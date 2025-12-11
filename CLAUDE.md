@@ -24,6 +24,11 @@ dns-core/
 │   ├── Configuration/        # 配置选项类
 │   ├── Models/              # DNS 数据模型
 │   ├── Protocol/            # DNS 协议实现
+│   ├── Repositories/        # 持久化仓储实现
+│   │   ├── IDnsRecordRepository.cs    # 仓储接口
+│   │   ├── JsonFileRepository.cs      # JSON 文件存储
+│   │   ├── SqliteRepository.cs        # SQLite 数据库
+│   │   └── LiteDbRepository.cs        # LiteDB 数据库
 │   ├── Services/            # 核心服务
 │   ├── wwwroot/             # Web 静态文件
 │   │   ├── index.html       # Web 管理界面
@@ -129,8 +134,21 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
    - 支持精确匹配和 ANY 类型查询
    - 泛域名匹配优先级：精确匹配 > 最具体的泛域名 > 较宽泛的泛域名
    - 使用 ConcurrentDictionary 确保线程安全
+   - **集成持久化支持**，通过 IDnsRecordRepository 保存和加载记录
 
-4. **UpstreamDnsResolver** (`src/DnsCore/Services/UpstreamDnsResolver.cs`)
+4. **持久化仓储** (`src/DnsCore/Repositories/`)
+   - **IDnsRecordRepository** - 定义持久化操作的接口
+   - **JsonFileRepository** - JSON 文件存储实现
+     - 使用 System.Text.Json 序列化
+     - 支持文件锁保证并发安全
+   - **SqliteRepository** - SQLite 数据库实现
+     - 使用 Microsoft.Data.Sqlite
+     - 支持事务和索引
+   - **LiteDbRepository** - LiteDB 数据库实现
+     - 使用 LiteDB NuGet 包
+     - 自动索引优化查询性能
+
+5. **UpstreamDnsResolver** (`src/DnsCore/Services/UpstreamDnsResolver.cs`)
    - 处理上游 DNS 查询
    - 支持自定义上游服务器或使用系统 DNS
    - 包含响应解析逻辑
@@ -178,6 +196,11 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
   - DnsServer.Port: DNS 监听端口（默认 53）
   - DnsServer.UpstreamDnsServers: 上游 DNS 列表（空则使用系统 DNS）
   - DnsServer.CustomRecords: 自定义 DNS 记录
+  - DnsServer.Persistence: 持久化配置
+    - Provider: 持久化提供者（JsonFile、Sqlite、LiteDb）
+    - FilePath: 数据文件路径
+    - AutoSave: 是否启用自动保存
+    - AutoSaveInterval: 自动保存间隔（秒）
   - Logging: 日志级别配置
 - 环境变量 `ASPNETCORE_URLS`: HTTP 服务器监听地址（默认 http://localhost:5000）
 

@@ -6,6 +6,7 @@
 
 - ✅ 自定义 DNS 记录（A, AAAA, CNAME, TXT 等）
 - ✅ **泛域名支持**（使用 `*.example.com` 匹配所有子域名）
+- ✅ **多种持久化方案**（支持 JSON 文件、SQLite、LiteDB 三种存储方式）
 - ✅ 上游 DNS 转发（支持自定义或使用系统默认 DNS）
 - ✅ **UDP 和 TCP 双协议支持**（符合 RFC 1035 标准）
 - ✅ **Web 管理界面**（现代化的可视化管理控制台）
@@ -24,6 +25,7 @@ dns-core/
 │       ├── Configuration/    # 配置管理
 │       ├── Models/          # 数据模型
 │       ├── Protocol/        # DNS 协议实现
+│       ├── Repositories/    # 持久化仓储
 │       ├── Services/        # 核心服务
 │       ├── wwwroot/         # Web 静态文件
 │       └── Program.cs       # 程序入口
@@ -182,6 +184,88 @@ curl -X DELETE http://localhost:5000/api/dns/records/example.local/A
 **Web 服务器配置:**
 - HTTP 端口默认为 5000，可通过环境变量 `ASPNETCORE_URLS` 修改
 - 开发模式下自动启用 Swagger UI
+
+## 持久化存储
+
+DNS Core Server 支持三种持久化方案，可以确保 DNS 记录在服务器重启后不会丢失。
+
+### 支持的持久化提供者
+
+1. **JSON 文件**（默认）
+   - 简单轻量，易于阅读和手动编辑
+   - 适合小规模数据（<10000 条记录）
+   - 无需额外依赖
+
+2. **SQLite**
+   - 成熟的关系型数据库
+   - 支持复杂查询和索引
+   - 适合中大规模数据
+
+3. **LiteDB**
+   - 轻量级 NoSQL 数据库
+   - .NET 原生支持，易于使用
+   - 性能优秀，适合各种规模
+
+### 配置持久化
+
+在 `appsettings.json` 中添加 `Persistence` 配置：
+
+```json
+{
+  "DnsServer": {
+    "Port": 53,
+    "Persistence": {
+      "Provider": "JsonFile",
+      "FilePath": "data/dns-records.json",
+      "AutoSave": true,
+      "AutoSaveInterval": 0
+    }
+  }
+}
+```
+
+**配置项说明：**
+- **Provider**: 持久化提供者类型
+  - `JsonFile` - JSON 文件存储
+  - `Sqlite` - SQLite 数据库
+  - `LiteDb` - LiteDB 数据库
+- **FilePath**: 数据文件路径
+  - JSON: `data/dns-records.json`
+  - SQLite: `data/dns-records.db`
+  - LiteDB: `data/dns-records.litedb`
+- **AutoSave**: 是否启用自动保存（默认 true）
+- **AutoSaveInterval**: 自动保存间隔（秒），0 表示立即保存
+
+### 切换持久化方案
+
+**使用 SQLite：**
+```json
+{
+  "Persistence": {
+    "Provider": "Sqlite",
+    "FilePath": "data/dns-records.db"
+  }
+}
+```
+
+**使用 LiteDB：**
+```json
+{
+  "Persistence": {
+    "Provider": "LiteDb",
+    "FilePath": "data/dns-records.litedb"
+  }
+}
+```
+
+### 数据迁移
+
+如果需要在不同持久化方案之间迁移数据：
+
+1. 导出现有记录（通过 API 获取所有记录）
+2. 更改配置文件中的 `Provider` 和 `FilePath`
+3. 重启服务器
+4. 导入记录（通过 API 添加记录）
 
 ## 支持的记录类型
 

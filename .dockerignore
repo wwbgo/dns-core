@@ -3,60 +3,43 @@
 .gitignore
 .gitattributes
 
-# CI/CD
-.github
-.vscode
+# Visual Studio / Visual Studio Code
 .vs
+.vscode
+*.user
+*.suo
 
-# 构建输出
-**/bin/
-**/obj/
-**/out/
-**/publish/
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
 
-# 测试
-tests/
-**/*.Tests/
+# Test artifacts
 TestResults/
-
-# 文档
-*.md
-docs/
-!README.md
-
-# 日志
-logs/
-*.log
-
-# 临时文件
-**/.DS_Store
-**/Thumbs.db
-**/*.swp
-**/*.tmp
-**/*.temp
+*.trx
+*.coverage
 
 # NuGet
 *.nupkg
-*.snupkg
 .nuget/
 packages/
 
-# IDE
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-*.userprefs
-.idea/
+# Documentation
+*.md
+!README.md
+docs/
 
-# Docker
-Dockerfile*
-docker-compose*
-.dockerignore
-
-# 其他
-LICENSE
-CONTRIBUTING.md
-*.bat
+# Scripts
+scripts/
 *.sh
-start-server.*
+*.bat
+
+# Test data
+test-data/
+tests/PersistenceTest/
+
+# Other
+publish/

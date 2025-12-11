@@ -1,5 +1,6 @@
 using System.Text;
 using DnsCore.Configuration;
+using DnsCore.Repositories;
 using DnsCore.Services;
 
 // 设置控制台输出编码为 UTF-8（修复 Docker 中文乱码）
@@ -30,6 +31,24 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 var dnsOptions = builder.Configuration.GetSection("DnsServer").Get<DnsServerOptions>() ?? new();
 builder.Services.AddSingleton(dnsOptions);
 
+// 注册持久化仓储
+builder.Services.AddSingleton<IDnsRecordRepository>(sp =>
+{
+    var logger = sp.GetRequiredService<ILogger<Program>>();
+    var options = dnsOptions.Persistence;
+
+    logger.LogInformation("配置持久化提供者: {Provider}, 文件路径: {FilePath}",
+        options.Provider, options.FilePath);
+
+    return options.Provider switch
+    {
+        PersistenceProvider.JsonFile => new JsonFileRepository(options.FilePath),
+        PersistenceProvider.Sqlite => new SqliteRepository(options.FilePath),
+        PersistenceProvider.LiteDb => new LiteDbRepository(options.FilePath),
+        _ => throw new InvalidOperationException($"不支持的持久化提供者: {options.Provider}")
+    };
+});
+
 // 注册 DNS 服务
 builder.Services.AddSingleton<CustomRecordStore>();
 builder.Services.AddSingleton<UpstreamDnsResolver>();
@@ -37,6 +56,17 @@ builder.Services.AddSingleton<DnsServer>();
 builder.Services.AddHostedService<DnsServerHostedService>();
 
 var app = builder.Build();
+
+// 加载持久化的 DNS 记录
+var customRecordStore = app.Services.GetRequiredService<CustomRecordStore>();
+await customRecordStore.LoadFromPersistenceAsync();
+
+// 然后加载配置文件中的初始记录（如果有的话）
+if (dnsOptions.CustomRecords.Count > 0)
+{
+    app.Logger.LogInformation("从配置文件加载 {Count} 条初始记录", dnsOptions.CustomRecords.Count);
+    customRecordStore.AddRecords(dnsOptions.CustomRecords);
+}
 
 // 配置中间件
 if (app.Environment.IsDevelopment())
@@ -70,7 +100,7 @@ dnsApi.MapGet("/records", (CustomRecordStore store) =>
 .WithName("GetAllRecords");
 
 // 添加自定义记录
-dnsApi.MapPost("/records", (DnsCore.Models.DnsRecord record, CustomRecordStore store) =>
+dnsApi.MapPost("/records", async (DnsCore.Models.DnsRecord record, CustomRecordStore store) =>
 {
     try
     {
@@ -90,7 +120,7 @@ dnsApi.MapPost("/records", (DnsCore.Models.DnsRecord record, CustomRecordStore s
             return Results.BadRequest(new { error = "TTL must be greater than 0" });
         }
 
-        store.AddRecord(record);
+        await store.AddRecordAsync(record);
         return Results.Created($"/api/dns/records/{record.Domain}", record);
     }
     catch (Exception ex)
@@ -101,14 +131,14 @@ dnsApi.MapPost("/records", (DnsCore.Models.DnsRecord record, CustomRecordStore s
 .WithName("AddRecord");
 
 // 删除自定义记录
-dnsApi.MapDelete("/records/{domain}/{type}", (string domain, string type, CustomRecordStore store) =>
+dnsApi.MapDelete("/records/{domain}/{type}", async (string domain, string type, CustomRecordStore store) =>
 {
     if (!Enum.TryParse<DnsCore.Models.DnsRecordType>(type, ignoreCase: true, out var recordType))
     {
         return Results.BadRequest(new { Error = "Invalid record type" });
     }
 
-    var removed = store.RemoveRecord(domain, recordType);
+    var removed = await store.RemoveRecordAsync(domain, recordType);
     return removed ? Results.NoContent() : Results.NotFound();
 })
 .WithName("DeleteRecord");
@@ -127,9 +157,9 @@ dnsApi.MapGet("/records/{domain}/{type}", (string domain, string type, CustomRec
 .WithName("QueryRecord");
 
 // 清空所有自定义记录
-dnsApi.MapDelete("/records", (CustomRecordStore store) =>
+dnsApi.MapDelete("/records", async (CustomRecordStore store) =>
 {
-    store.Clear();
+    await store.ClearAsync();
     return Results.NoContent();
 })
 .WithName("ClearAllRecords");

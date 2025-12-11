@@ -53,7 +53,7 @@ services:
       # - ./logs:/app/logs
 
       # 挂载自定义记录数据（可选）
-      # - ./data:/app/data
+      - ./data:/app/data
 
     # 网络配置
     networks:

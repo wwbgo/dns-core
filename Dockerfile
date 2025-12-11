@@ -5,14 +5,15 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-# 复制项目文件
+# 复制解决方案文件和项目文件
+# COPY ["DnsCore.sln", "./"]
 COPY ["src/DnsCore/DnsCore.csproj", "src/DnsCore/"]
 
-# 还原 NuGet 包
+# 还原 NuGet 包（包含 Microsoft.Data.Sqlite 和 LiteDB）
 RUN dotnet restore "src/DnsCore/DnsCore.csproj"
 
 # 复制所有源代码
-COPY . .
+COPY ["src/", "src/"]
 
 # 构建项目
 WORKDIR "/src/src/DnsCore"
@@ -33,14 +34,17 @@ WORKDIR /app
 # 创建非 root 用户（安全最佳实践）
 RUN groupadd -r dnscore && useradd -r -g dnscore dnscore
 
+# 创建数据目录用于持久化存储
+RUN mkdir -p /app/data && chown -R dnscore:dnscore /app/data
+
 # 复制发布的文件
 COPY --from=publish /app/publish .
 
-# 复制配置文件（如果不存在则使用默认值）
-COPY --from=build /src/src/DnsCore/appsettings.json ./appsettings.json
-
 # 设置文件权限
 RUN chown -R dnscore:dnscore /app
+
+# 创建数据卷
+VOLUME ["/app/data"]
 
 # 暴露端口
 # 53/UDP - DNS 服务端口（UDP）
@@ -60,8 +64,8 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DOTNET_EnableDiagnostics=0
 
 # 设置 UTF-8 编码支持（修复中文乱码）
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
+ENV LANG=zh_CN.UTF-8
+ENV LC_ALL=zh_CN.UTF-8
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
 
 # 健康检查

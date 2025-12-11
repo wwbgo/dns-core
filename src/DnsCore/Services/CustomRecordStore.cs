@@ -1,4 +1,5 @@
 using DnsCore.Models;
+using DnsCore.Repositories;
 using System.Collections.Concurrent;
 
 namespace DnsCore.Services;
@@ -6,14 +7,79 @@ namespace DnsCore.Services;
 /// <summary>
 /// 自定义 DNS 记录存储
 /// </summary>
-public sealed class CustomRecordStore(ILogger<CustomRecordStore> logger)
+public sealed class CustomRecordStore(
+    ILogger<CustomRecordStore> logger,
+    IDnsRecordRepository? repository = null)
 {
     private readonly ConcurrentDictionary<string, List<DnsRecord>> _records = new();
+    private readonly SemaphoreSlim _persistLock = new(1, 1);
+
+    /// <summary>
+    /// 从持久化存储加载记录
+    /// </summary>
+    public async Task LoadFromPersistenceAsync()
+    {
+        if (repository is null)
+        {
+            logger.LogDebug("未配置持久化存储，跳过加载");
+            return;
+        }
+
+        try
+        {
+            var records = await repository.LoadAllAsync();
+            foreach (var record in records)
+            {
+                var key = GetKey(record.Domain, record.Type);
+                _records.AddOrUpdate(
+                    key,
+                    _ => [record],
+                    (_, list) =>
+                    {
+                        list.Add(record);
+                        return list;
+                    });
+            }
+
+            logger.LogInformation("从持久化存储加载了 {Count} 条记录", records.Count());
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "从持久化存储加载记录失败");
+        }
+    }
+
+    /// <summary>
+    /// 保存到持久化存储
+    /// </summary>
+    private async Task SaveToPersistenceAsync()
+    {
+        if (repository is null)
+        {
+            return;
+        }
+
+        await _persistLock.WaitAsync();
+        try
+        {
+            var allRecords = GetAllRecords().ToList();
+            await repository.SaveAllAsync(allRecords);
+            logger.LogDebug("保存了 {Count} 条记录到持久化存储", allRecords.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "保存记录到持久化存储失败");
+        }
+        finally
+        {
+            _persistLock.Release();
+        }
+    }
 
     /// <summary>
     /// 添加自定义记录
     /// </summary>
-    public void AddRecord(DnsRecord record)
+    public async Task AddRecordAsync(DnsRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
 
@@ -28,19 +94,50 @@ public sealed class CustomRecordStore(ILogger<CustomRecordStore> logger)
             });
 
         logger.LogInformation("添加自定义记录: {Record}", record);
+        await SaveToPersistenceAsync();
+    }
+
+    /// <summary>
+    /// 添加自定义记录（同步版本，用于向后兼容）
+    /// </summary>
+    public void AddRecord(DnsRecord record)
+    {
+        AddRecordAsync(record).GetAwaiter().GetResult();
     }
 
     /// <summary>
     /// 批量添加记录
     /// </summary>
-    public void AddRecords(IEnumerable<DnsRecord> records)
+    public async Task AddRecordsAsync(IEnumerable<DnsRecord> records)
     {
         ArgumentNullException.ThrowIfNull(records);
 
         foreach (var record in records)
         {
-            AddRecord(record);
+            ArgumentNullException.ThrowIfNull(record);
+
+            var key = GetKey(record.Domain, record.Type);
+            _records.AddOrUpdate(
+                key,
+                _ => [record],
+                (_, list) =>
+                {
+                    list.Add(record);
+                    return list;
+                });
+
+            logger.LogInformation("添加自定义记录: {Record}", record);
         }
+
+        await SaveToPersistenceAsync();
+    }
+
+    /// <summary>
+    /// 批量添加记录（同步版本，用于向后兼容）
+    /// </summary>
+    public void AddRecords(IEnumerable<DnsRecord> records)
+    {
+        AddRecordsAsync(records).GetAwaiter().GetResult();
     }
 
     /// <summary>
@@ -123,7 +220,7 @@ public sealed class CustomRecordStore(ILogger<CustomRecordStore> logger)
     /// <summary>
     /// 移除记录
     /// </summary>
-    public bool RemoveRecord(string domain, DnsRecordType type)
+    public async Task<bool> RemoveRecordAsync(string domain, DnsRecordType type)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
@@ -133,18 +230,36 @@ public sealed class CustomRecordStore(ILogger<CustomRecordStore> logger)
         if (removed)
         {
             logger.LogInformation("移除自定义记录: {Domain} {Type}", domain, type);
+            await SaveToPersistenceAsync();
         }
 
         return removed;
     }
 
     /// <summary>
+    /// 移除记录（同步版本，用于向后兼容）
+    /// </summary>
+    public bool RemoveRecord(string domain, DnsRecordType type)
+    {
+        return RemoveRecordAsync(domain, type).GetAwaiter().GetResult();
+    }
+
+    /// <summary>
     /// 清空所有记录
     /// </summary>
-    public void Clear()
+    public async Task ClearAsync()
     {
         _records.Clear();
         logger.LogInformation("清空所有自定义记录");
+        await SaveToPersistenceAsync();
+    }
+
+    /// <summary>
+    /// 清空所有记录（同步版本，用于向后兼容）
+    /// </summary>
+    public void Clear()
+    {
+        ClearAsync().GetAwaiter().GetResult();
     }
 
     /// <summary>

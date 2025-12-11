@@ -71,3 +71,16 @@ bld/
 
 # Others
 appsettings.Development.json
+
+# 测试数据
+test-data/
+
+# 临时测试项目
+tests/PersistenceTest.cs
+tests/PersistenceTest/
+
+# 持久化数据文件
+data/
+*.db
+*.litedb
+dns-records.json
