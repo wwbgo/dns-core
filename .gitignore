@@ -66,5 +66,8 @@ bld/
 *.nuget.props
 *.nuget.targets
 
+# Claude Code local settings
+.claude/settings.local.json
+
 # Others
 appsettings.Development.json
