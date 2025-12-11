@@ -177,11 +177,16 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
 
 ### DNS 查询流程
 
-1. 接收客户端 DNS 查询（UDP 53 端口）
+1. 接收客户端 DNS 查询（UDP/TCP 53 端口）
 2. 解析 DNS 查询消息
 3. 在 CustomRecordStore 中查找匹配记录
-4. 如果未找到，使用 UpstreamDnsResolver 转发查询
-5. 构建并返回 DNS 响应
+4. 如果找到，返回自定义记录
+5. 如果未找到且 EnableUpstreamDnsQuery 为 true，使用 UpstreamDnsResolver 转发查询
+   - 成功：返回上游 DNS 结果
+   - 失败：返回 NXDOMAIN
+6. 如果未找到且 EnableUpstreamDnsQuery 为 false，返回 SERVFAIL
+   - 客户端会自动尝试系统配置的下一个 DNS 服务器
+7. 构建并返回 DNS 响应
 
 ### Web API 流程
 
@@ -195,6 +200,9 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
 - `src/DnsCore/appsettings.json`: 主配置文件
   - DnsServer.Port: DNS 监听端口（默认 53）
   - DnsServer.UpstreamDnsServers: 上游 DNS 列表（空则使用系统 DNS）
+  - DnsServer.EnableUpstreamDnsQuery: 是否启用上游 DNS 查询（默认 false）
+    - true: 自定义记录不存在时查询上游 DNS
+    - false: 自定义记录不存在时返回 SERVFAIL，让客户端尝试下一个 DNS 服务器
   - DnsServer.CustomRecords: 自定义 DNS 记录
   - DnsServer.Persistence: 持久化配置
     - Provider: 持久化提供者（JsonFile、Sqlite、LiteDb）

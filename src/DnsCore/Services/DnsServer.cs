@@ -237,21 +237,30 @@ public sealed class DnsServer(
             // 1. Query custom records first
             var answers = customRecordStore.Query(question.Name, question.Type);
 
+            byte[] responseData;
             if (answers is { Count: > 0 })
             {
+                // Found custom record, return success
                 logger.LogInformation("Responding with custom record ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
+                responseData = BuildSuccessResponse(header, questions, answers, question, protocol);
+            }
+            else if (options.EnableUpstreamDnsQuery)
+            {
+                // 2. Custom record not found, upstream DNS query is enabled
+                logger.LogInformation("Custom record not found, querying upstream DNS ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
+                answers = await upstreamResolver.QueryAsync(question.Name, question.Type, requestData);
+
+                responseData = answers is { Count: > 0 }
+                    ? BuildSuccessResponse(header, questions, answers, question, protocol)
+                    : BuildNxDomainResponse(header, questions, question, protocol);
             }
             else
             {
-                // 2. If not found, query upstream DNS
-                logger.LogInformation("Custom record not found, querying upstream DNS ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
-                answers = await upstreamResolver.QueryAsync(question.Name, question.Type, requestData);
+                // 3. Custom record not found, upstream DNS query is disabled
+                // Return SERVFAIL to let client try next DNS server
+                logger.LogInformation("Custom record not found and upstream DNS query is disabled, returning SERVFAIL to let client try next DNS server ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
+                responseData = BuildServFailResponse(header, questions, question, protocol);
             }
-
-            // 3. Build response
-            byte[] responseData = answers is { Count: > 0 }
-                ? BuildSuccessResponse(header, questions, answers, question, protocol)
-                : BuildErrorResponse(header, questions, question, protocol);
 
             return responseData;
         }
@@ -275,14 +284,26 @@ public sealed class DnsServer(
     }
 
     /// <summary>
-    /// Build error response
+    /// Build NXDOMAIN response (domain does not exist)
     /// </summary>
-    private byte[] BuildErrorResponse(DnsHeader header, List<DnsQuestion> questions, DnsQuestion question, string protocol)
+    private byte[] BuildNxDomainResponse(DnsHeader header, List<DnsQuestion> questions, DnsQuestion question, string protocol)
     {
         header.SetAsResponse();
         header.Flags |= 0x0003; // RCODE = 3 (NXDOMAIN)
         var response = DnsMessageParser.BuildResponse(header, questions, []);
         logger.LogWarning("DNS query failed, returning NXDOMAIN ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
+        return response;
+    }
+
+    /// <summary>
+    /// Build SERVFAIL response (server failure, client should try next DNS server)
+    /// </summary>
+    private byte[] BuildServFailResponse(DnsHeader header, List<DnsQuestion> questions, DnsQuestion question, string protocol)
+    {
+        header.SetAsResponse();
+        header.Flags |= 0x0002; // RCODE = 2 (SERVFAIL)
+        var response = DnsMessageParser.BuildResponse(header, questions, []);
+        logger.LogInformation("Returning SERVFAIL ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
         return response;
     }
 }

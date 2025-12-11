@@ -150,6 +150,7 @@ curl -X DELETE http://localhost:5000/api/dns/records/example.local/A
       "8.8.8.8",
       "1.1.1.1"
     ],
+    "EnableUpstreamDnsQuery": false,
     "CustomRecords": [
       {
         "Domain": "example.local",
@@ -175,6 +176,10 @@ curl -X DELETE http://localhost:5000/api/dns/records/example.local/A
 - **UpstreamDnsServers**: 上游 DNS 服务器列表（可选）
   - 留空则使用系统默认 DNS 服务器
   - 可以配置多个，按顺序尝试
+- **EnableUpstreamDnsQuery**: 是否启用上游 DNS 查询（默认 false）
+  - `true` - 当自定义记录不存在时，查询上游 DNS
+  - `false` - 当自定义记录不存在时，返回 SERVFAIL（服务器故障），让客户端尝试系统配置的下一个 DNS 服务器
+  - 适用场景：如果只想解析自定义记录而不转发到公共 DNS，设置为 false，客户端会自动回退到系统的其他 DNS 服务器
 - **CustomRecords**: 自定义 DNS 记录列表
   - **Domain**: 域名
   - **Type**: 记录类型（A, AAAA, CNAME, TXT 等）
@@ -401,8 +406,12 @@ nslookup -vc example.local 127.0.0.1
 1. DNS 服务器同时在 UDP 53 和 TCP 53 端口监听客户端查询请求
 2. 首先在自定义记录中查找匹配项
 3. 如果找到匹配，返回自定义记录
-4. 如果未找到，转发到上游 DNS 服务器
-5. 返回上游 DNS 的查询结果
+4. 如果未找到且 `EnableUpstreamDnsQuery` 为 `true`，转发到上游 DNS 服务器
+   - 如果上游 DNS 返回结果，返回给客户端
+   - 如果上游 DNS 未找到，返回 NXDOMAIN（域名不存在）
+5. 如果未找到且 `EnableUpstreamDnsQuery` 为 `false`，返回 SERVFAIL（服务器故障）
+   - 客户端收到 SERVFAIL 后会自动尝试系统配置的下一个 DNS 服务器
+   - 这样可以实现只解析自定义记录，其他域名由系统的其他 DNS 服务器处理
 6. TCP 查询会自动处理消息长度前缀（2字节大端序）
 
 **Web API 管理:**
