@@ -200,7 +200,7 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
 - `src/DnsCore/appsettings.json`: 主配置文件
   - DnsServer.Port: DNS 监听端口（默认 53）
   - DnsServer.UpstreamDnsServers: 上游 DNS 列表（空则使用系统 DNS）
-  - DnsServer.EnableUpstreamDnsQuery: 是否启用上游 DNS 查询（默认 false）
+  - DnsServer.EnableUpstreamDnsQuery: 是否启用上游 DNS 查询（默认 true）
     - true: 自定义记录不存在时查询上游 DNS
     - false: 自定义记录不存在时返回 SERVFAIL，让客户端尝试下一个 DNS 服务器
   - DnsServer.CustomRecords: 自定义 DNS 记录

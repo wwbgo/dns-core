@@ -17,5 +17,5 @@ public class DnsServerOptions
     /// - true: 查询上游DNS
     /// - false: 返回 SERVFAIL，让客户端尝试系统配置的下一个 DNS 服务器
     /// </summary>
-    public bool EnableUpstreamDnsQuery { get; set; } = false;
+    public bool EnableUpstreamDnsQuery { get; set; } = true;
 }
