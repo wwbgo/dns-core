@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNS Core Server - 管理控制台</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌐 DNS Core Server</h1>
+            <p class="subtitle">DNS 记录管理控制台</p>
+        </header>
+
+        <!-- 状态栏 -->
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">服务状态:</span>
+                <span id="serverStatus" class="status-value loading">检查中...</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">记录总数:</span>
+                <span id="recordCount" class="status-value">0</span>
+            </div>
+            <div class="status-item">
+                <button id="refreshBtn" class="btn btn-secondary">🔄 刷新</button>
+            </div>
+        </div>
+
+        <!-- 操作面板 -->
+        <div class="panel">
+            <h2>📝 添加 DNS 记录</h2>
+            <div class="info-box">
+                <strong>💡 提示:</strong> 支持泛域名记录，使用 <code>*.example.com</code> 格式可匹配所有子域名
+            </div>
+            <form id="addRecordForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="domain">域名 * <span class="label-hint">(支持泛域名 *.example.com)</span></label>
+                        <input type="text" id="domain" name="domain" placeholder="example.local 或 *.example.local" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="type">记录类型 *</label>
+                        <select id="type" name="type" required>
+                            <option value="A">A (IPv4)</option>
+                            <option value="AAAA">AAAA (IPv6)</option>
+                            <option value="CNAME">CNAME (别名)</option>
+                            <option value="TXT">TXT (文本)</option>
+                            <option value="NS">NS (名称服务器)</option>
+                            <option value="MX">MX (邮件交换)</option>
+                            <option value="PTR">PTR (指针)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="value">记录值 *</label>
+                        <input type="text" id="value" name="value" placeholder="192.168.1.100" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="ttl">TTL (秒)</label>
+                        <input type="number" id="ttl" name="ttl" value="3600" min="60" max="86400">
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">➕ 添加记录</button>
+                    <button type="button" id="clearAllBtn" class="btn btn-danger">🗑️ 清空所有记录</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- 记录列表 -->
+        <div class="panel">
+            <h2>📋 DNS 记录列表</h2>
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="🔍 搜索域名或值...">
+            </div>
+            <div class="table-container">
+                <table id="recordsTable">
+                    <thead>
+                        <tr>
+                            <th>域名</th>
+                            <th>类型</th>
+                            <th>记录值</th>
+                            <th>TTL</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recordsBody">
+                        <tr class="loading-row">
+                            <td colspan="5">加载中...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 提示消息 -->
+        <div id="toast" class="toast"></div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

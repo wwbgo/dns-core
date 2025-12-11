@@ -1,0 +1,110 @@
+# DNS Core Server - Docker Compose 配置
+# 用于快速部署和管理 DNS 服务器容器
+
+services:
+  dns-core:
+    # 镜像配置
+    image: dns-core-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_DATE: ${BUILD_DATE:-2024-01-01T00:00:00Z}
+        VERSION: ${VERSION:-latest}
+
+    # 容器名称
+    container_name: dns-core-server
+
+    # 重启策略
+    restart: unless-stopped
+
+    # 端口映射
+    ports:
+      # DNS 服务端口 (UDP)
+      - "53:53/udp"
+      # DNS 服务端口 (TCP) - 可选
+      - "53:53/tcp"
+      # Web 管理界面和 API
+      - "5000:5000"
+
+    # 环境变量
+    environment:
+      # ASP.NET Core 配置
+      - ASPNETCORE_URLS=http://+:5000
+      - ASPNETCORE_ENVIRONMENT=Production
+
+      # .NET 诊断配置
+      - DOTNET_EnableDiagnostics=0
+
+      # UTF-8 编码支持（修复中文乱码）
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+
+      # 时区设置
+      - TZ=Asia/Shanghai
+
+    # 数据卷挂载
+    volumes:
+      # 挂载配置文件（可选）
+      # - ./appsettings.Production.json:/app/appsettings.json:ro
+
+      # 挂载日志目录（可选）
+      # - ./logs:/app/logs
+
+      # 挂载自定义记录数据（可选）
+      # - ./data:/app/data
+
+    # 网络配置
+    networks:
+      - dns-network
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+    # 资源限制（可选）
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '0.5'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.25'
+    #       memory: 256M
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 安全配置
+    security_opt:
+      - no-new-privileges:true
+
+    # 只读根文件系统（可选，需要配置临时目录）
+    # read_only: true
+    # tmpfs:
+    #   - /tmp
+    #   - /app/logs
+
+# 网络配置
+networks:
+  dns-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# 数据卷配置（可选）
+# volumes:
+#   dns-data:
+#     driver: local
+#   dns-logs:
+#     driver: local
