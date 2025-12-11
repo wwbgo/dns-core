@@ -108,14 +108,14 @@ public sealed class DnsMessageParser
 
             while (true)
             {
-                if (jumps++ > maxJumps)
-                    throw new InvalidDataException("DNS 消息压缩过多");
-
                 var length = data[offset];
 
                 // 压缩指针
                 if ((length & 0xC0) == 0xC0)
                 {
+                    if (jumps++ > maxJumps)
+                        throw new InvalidDataException("DNS 消息压缩过多");
+
                     if (!jumped)
                         jumpOffset = offset + 2;
 

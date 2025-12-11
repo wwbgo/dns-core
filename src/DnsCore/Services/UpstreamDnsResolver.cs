@@ -254,14 +254,14 @@ public sealed class UpstreamDnsResolver(
 
         while (true)
         {
-            if (jumps++ > maxJumps)
-                throw new InvalidDataException("Too many DNS message compressions");
-
             var length = data[offset];
 
             // Compression pointer
             if ((length & 0xC0) == 0xC0)
             {
+                if (jumps++ > maxJumps)
+                    throw new InvalidDataException("Too many DNS message compressions");
+
                 if (!jumped)
                     jumpOffset = offset + 2;
 
