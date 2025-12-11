@@ -7,11 +7,15 @@ using System.Net.NetworkInformation;
 namespace DnsCore.Services;
 
 /// <summary>
-/// Upstream DNS resolver
+/// Upstream DNS resolver（性能优化：添加缓存 + 复用 UdpClient）
 /// </summary>
-public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
+public sealed class UpstreamDnsResolver(
+    ILogger<UpstreamDnsResolver> logger,
+    DnsCache dnsCache) : IDisposable
 {
     private readonly List<IPAddress> _upstreamServers = [];
+    private readonly SemaphoreSlim _udpClientSemaphore = new(1, 1);
+    private UdpClient? _sharedUdpClient;
     private const int Timeout = 5000; // 5 seconds timeout
     private const int DnsPort = 53;
 
@@ -48,12 +52,19 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
     }
 
     /// <summary>
-    /// Query upstream DNS servers
+    /// Query upstream DNS servers（性能优化：先查缓存）
     /// </summary>
     public async Task<List<DnsRecord>?> QueryAsync(string domain, DnsRecordType type, byte[] queryData)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
         ArgumentNullException.ThrowIfNull(queryData);
+
+        // 1. 先查询缓存
+        var cachedResult = dnsCache.Get(domain, type);
+        if (cachedResult is not null)
+        {
+            return cachedResult;
+        }
 
         if (_upstreamServers.Count == 0)
         {
@@ -61,7 +72,7 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
             return null;
         }
 
-        // Try each upstream DNS server
+        // 2. 缓存未命中，查询上游服务器
         foreach (var server in _upstreamServers)
         {
             try
@@ -72,6 +83,10 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
                 if (response is { Count: > 0 })
                 {
                     logger.LogInformation("Received response from upstream DNS server: {Server} - {Domain} {Type}", server, domain, type);
+
+                    // 3. 缓存查询结果
+                    dnsCache.Set(domain, type, response);
+
                     return response;
                 }
             }
@@ -86,30 +101,39 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
     }
 
     /// <summary>
-    /// Query a single DNS server
+    /// Query a single DNS server（性能优化：复用 UdpClient）
     /// </summary>
     private async Task<List<DnsRecord>?> QueryServerAsync(IPAddress server, byte[] queryData)
     {
-        using var udpClient = new UdpClient();
-        udpClient.Client.ReceiveTimeout = Timeout;
-        udpClient.Client.SendTimeout = Timeout;
-
-        var endpoint = new IPEndPoint(server, DnsPort);
-
-        // Send query
-        await udpClient.SendAsync(queryData, endpoint);
-
-        // Receive response
-        using var cts = new CancellationTokenSource(Timeout);
+        await _udpClientSemaphore.WaitAsync();
         try
         {
-            var result = await udpClient.ReceiveAsync(cts.Token);
-            return ParseUpstreamResponse(result.Buffer);
+            // 延迟初始化 UdpClient
+            _sharedUdpClient ??= new UdpClient();
+            _sharedUdpClient.Client.ReceiveTimeout = Timeout;
+            _sharedUdpClient.Client.SendTimeout = Timeout;
+
+            var endpoint = new IPEndPoint(server, DnsPort);
+
+            // Send query
+            await _sharedUdpClient.SendAsync(queryData, endpoint);
+
+            // Receive response
+            using var cts = new CancellationTokenSource(Timeout);
+            try
+            {
+                var result = await _sharedUdpClient.ReceiveAsync(cts.Token);
+                return ParseUpstreamResponse(result.Buffer);
+            }
+            catch (OperationCanceledException)
+            {
+                logger.LogWarning("Upstream DNS query timeout: {Server}", server);
+                return null;
+            }
         }
-        catch (OperationCanceledException)
+        finally
         {
-            logger.LogWarning("Upstream DNS query timeout: {Server}", server);
-            return null;
+            _udpClientSemaphore.Release();
         }
     }
 
@@ -321,5 +345,14 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
         {
             logger.LogError(ex, "Failed to load system DNS servers");
         }
+    }
+
+    /// <summary>
+    /// 释放资源
+    /// </summary>
+    public void Dispose()
+    {
+        _sharedUdpClient?.Dispose();
+        _udpClientSemaphore.Dispose();
     }
 }

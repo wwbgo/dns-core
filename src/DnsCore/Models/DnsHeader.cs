@@ -35,7 +35,10 @@ public sealed class DnsHeader
         return bytes;
     }
 
-    public static DnsHeader FromBytes(byte[] data, int offset = 0) => new()
+    public static DnsHeader FromBytes(byte[] data, int offset = 0)
+        => FromBytes(data.AsSpan(), offset);
+
+    public static DnsHeader FromBytes(ReadOnlySpan<byte> data, int offset = 0) => new()
     {
         TransactionId = ReadUInt16(data, offset),
         Flags = ReadUInt16(data, offset + 2),
@@ -45,7 +48,7 @@ public sealed class DnsHeader
         AdditionalCount = ReadUInt16(data, offset + 10)
     };
 
-    private static ushort ReadUInt16(byte[] data, int offset) =>
+    private static ushort ReadUInt16(ReadOnlySpan<byte> data, int offset) =>
         (ushort)((data[offset] << 8) | data[offset + 1]);
 
     private static void WriteUInt16(byte[] data, int offset, ushort value)

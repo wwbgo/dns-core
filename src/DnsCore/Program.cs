@@ -51,9 +51,11 @@ builder.Services.AddSingleton<IDnsRecordRepository>(sp =>
 
 // Register DNS services
 builder.Services.AddSingleton<CustomRecordStore>();
+builder.Services.AddSingleton<DnsCache>(); // 性能优化：DNS 查询缓存
 builder.Services.AddSingleton<UpstreamDnsResolver>();
 builder.Services.AddSingleton<DnsServer>();
 builder.Services.AddHostedService<DnsServerHostedService>();
+builder.Services.AddHostedService<DnsCacheCleanupService>(); // 性能优化：缓存清理服务
 
 var app = builder.Build();
 

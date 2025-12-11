@@ -1,16 +1,23 @@
 using DnsCore.Models;
+using System.Buffers;
 
 namespace DnsCore.Protocol;
 
 /// <summary>
-/// DNS 消息解析器
+/// DNS 消息解析器（性能优化版）
 /// </summary>
 public sealed class DnsMessageParser
 {
     /// <summary>
-    /// 解析 DNS 查询消息
+    /// 解析 DNS 查询消息（性能优化：使用 ReadOnlySpan）
     /// </summary>
     public static (DnsHeader header, List<DnsQuestion> questions) ParseQuery(byte[] data)
+        => ParseQuery(data.AsSpan());
+
+    /// <summary>
+    /// 解析 DNS 查询消息（Span 版本）
+    /// </summary>
+    public static (DnsHeader header, List<DnsQuestion> questions) ParseQuery(ReadOnlySpan<byte> data)
     {
         var header = DnsHeader.FromBytes(data, 0);
         List<DnsQuestion> questions = [];
@@ -85,50 +92,73 @@ public sealed class DnsMessageParser
     }
 
     /// <summary>
-    /// 读取域名（支持压缩）
+    /// 读取域名（支持压缩）- 性能优化：使用 Span
     /// </summary>
-    private static (string name, int offset) ReadDomainName(byte[] data, int offset)
+    private static (string name, int offset) ReadDomainName(ReadOnlySpan<byte> data, int offset)
     {
-        List<string> labels = [];
-        var jumped = false;
-        var jumpOffset = offset;
-        const int maxJumps = 5;
-        var jumps = 0;
-
-        while (true)
+        // 使用 ArrayPool 来复用 label 缓冲区
+        char[]? labelBuffer = null;
+        try
         {
-            if (jumps++ > maxJumps)
-                throw new InvalidDataException("DNS 消息压缩过多");
+            List<string> labels = [];
+            var jumped = false;
+            var jumpOffset = offset;
+            const int maxJumps = 5;
+            var jumps = 0;
 
-            var length = data[offset];
-
-            // 压缩指针
-            if ((length & 0xC0) == 0xC0)
+            while (true)
             {
-                if (!jumped)
-                    jumpOffset = offset + 2;
+                if (jumps++ > maxJumps)
+                    throw new InvalidDataException("DNS 消息压缩过多");
 
-                var pointer = ((length & 0x3F) << 8) | data[offset + 1];
-                offset = pointer;
-                jumped = true;
-                continue;
-            }
+                var length = data[offset];
 
-            // 域名结束
-            if (length == 0)
-            {
+                // 压缩指针
+                if ((length & 0xC0) == 0xC0)
+                {
+                    if (!jumped)
+                        jumpOffset = offset + 2;
+
+                    var pointer = ((length & 0x3F) << 8) | data[offset + 1];
+                    offset = pointer;
+                    jumped = true;
+                    continue;
+                }
+
+                // 域名结束
+                if (length == 0)
+                {
+                    offset++;
+                    break;
+                }
+
+                // 读取标签 - 使用 ArrayPool 优化
                 offset++;
-                break;
+                if (labelBuffer == null || labelBuffer.Length < length)
+                {
+                    if (labelBuffer != null)
+                        ArrayPool<char>.Shared.Return(labelBuffer);
+                    labelBuffer = ArrayPool<char>.Shared.Rent(length);
+                }
+
+                // 使用 Span 进行 ASCII 解码
+                var labelSpan = data.Slice(offset, length);
+                for (int i = 0; i < length; i++)
+                {
+                    labelBuffer[i] = (char)labelSpan[i];
+                }
+
+                labels.Add(new string(labelBuffer, 0, length));
+                offset += length;
             }
 
-            // 读取标签
-            offset++;
-            var label = System.Text.Encoding.ASCII.GetString(data, offset, length);
-            labels.Add(label);
-            offset += length;
+            return (string.Join('.', labels), jumped ? jumpOffset : offset);
         }
-
-        return (string.Join('.', labels), jumped ? jumpOffset : offset);
+        finally
+        {
+            if (labelBuffer != null)
+                ArrayPool<char>.Shared.Return(labelBuffer);
+        }
     }
 
     /// <summary>
@@ -180,7 +210,7 @@ public sealed class DnsMessageParser
     private static byte[] ParseIPv6(string ip) =>
         System.Net.IPAddress.Parse(ip).GetAddressBytes();
 
-    private static ushort ReadUInt16(byte[] data, int offset) =>
+    private static ushort ReadUInt16(ReadOnlySpan<byte> data, int offset) =>
         (ushort)((data[offset] << 8) | data[offset + 1]);
 
     private static void WriteUInt16(Stream stream, ushort value)

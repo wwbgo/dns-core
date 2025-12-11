@@ -1,13 +1,14 @@
 using DnsCore.Configuration;
 using DnsCore.Models;
 using DnsCore.Protocol;
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 
 namespace DnsCore.Services;
 
 /// <summary>
-/// DNS server
+/// DNS server（性能优化版）
 /// </summary>
 public sealed class DnsServer(
     ILogger<DnsServer> logger,
@@ -126,10 +127,13 @@ public sealed class DnsServer(
     }
 
     /// <summary>
-    /// Process TCP client connection
+    /// Process TCP client connection（性能优化：使用 ArrayPool）
     /// </summary>
     private async Task ProcessTcpClientAsync(TcpClient client)
     {
+        byte[]? requestBuffer = null;
+        byte[]? responseBuffer = null;
+
         try
         {
             using (client)
@@ -138,59 +142,75 @@ public sealed class DnsServer(
                 var clientEndpoint = client.Client.RemoteEndPoint as IPEndPoint;
 
                 // TCP DNS message format: first 2 bytes are message length (big-endian)
-                var lengthBuffer = new byte[2];
-                var bytesRead = await stream.ReadAsync(lengthBuffer, 0, 2);
-
-                if (bytesRead != 2)
+                var lengthBuffer = ArrayPool<byte>.Shared.Rent(2);
+                try
                 {
-                    logger.LogWarning("TCP request length insufficient, from {Client}", clientEndpoint);
-                    return;
+                    var bytesRead = await stream.ReadAsync(lengthBuffer.AsMemory(0, 2));
+
+                    if (bytesRead != 2)
+                    {
+                        logger.LogWarning("TCP request length insufficient, from {Client}", clientEndpoint);
+                        return;
+                    }
+
+                    // Parse message length (big-endian)
+                    var messageLength = (lengthBuffer[0] << 8) | lengthBuffer[1];
+
+                    // 性能优化：使用 ArrayPool 租用缓冲区
+                    requestBuffer = ArrayPool<byte>.Shared.Rent(messageLength);
+                    var totalRead = 0;
+
+                    while (totalRead < messageLength)
+                    {
+                        bytesRead = await stream.ReadAsync(requestBuffer.AsMemory(totalRead, messageLength - totalRead));
+                        if (bytesRead == 0)
+                            break;
+                        totalRead += bytesRead;
+                    }
+
+                    if (totalRead != messageLength)
+                    {
+                        logger.LogWarning("TCP DNS message read incomplete, from {Client}", clientEndpoint);
+                        return;
+                    }
+
+                    logger.LogDebug("Received TCP DNS query, length: {Length} bytes, from {Client}", messageLength, clientEndpoint);
+
+                    // Process DNS query (只传递实际使用的部分)
+                    var requestSpan = requestBuffer.AsSpan(0, messageLength);
+                    var requestData = requestSpan.ToArray(); // 暂时转换为数组，后续可以进一步优化
+                    var responseData = await ProcessDnsQueryAsync(requestData, clientEndpoint!, "TCP");
+
+                    if (responseData != null)
+                    {
+                        // TCP response format: first 2 bytes are message length (big-endian) + DNS message
+                        var responseLength = responseData.Length;
+                        responseBuffer = ArrayPool<byte>.Shared.Rent(responseLength + 2);
+
+                        responseBuffer[0] = (byte)(responseLength >> 8);
+                        responseBuffer[1] = (byte)(responseLength & 0xFF);
+                        Array.Copy(responseData, 0, responseBuffer, 2, responseLength);
+
+                        await stream.WriteAsync(responseBuffer.AsMemory(0, responseLength + 2));
+                        await stream.FlushAsync();
+                    }
                 }
-
-                // Parse message length (big-endian)
-                var messageLength = (lengthBuffer[0] << 8) | lengthBuffer[1];
-
-                // Read DNS message
-                var requestData = new byte[messageLength];
-                var totalRead = 0;
-
-                while (totalRead < messageLength)
+                finally
                 {
-                    bytesRead = await stream.ReadAsync(requestData, totalRead, messageLength - totalRead);
-                    if (bytesRead == 0)
-                        break;
-                    totalRead += bytesRead;
-                }
-
-                if (totalRead != messageLength)
-                {
-                    logger.LogWarning("TCP DNS message read incomplete, from {Client}", clientEndpoint);
-                    return;
-                }
-
-                logger.LogDebug("Received TCP DNS query, length: {Length} bytes, from {Client}", messageLength, clientEndpoint);
-
-                // Process DNS query
-                var responseData = await ProcessDnsQueryAsync(requestData, clientEndpoint!, "TCP");
-
-                if (responseData != null)
-                {
-                    // TCP response format: first 2 bytes are message length (big-endian) + DNS message
-                    var responseLength = responseData.Length;
-                    var tcpResponse = new byte[responseLength + 2];
-
-                    tcpResponse[0] = (byte)(responseLength >> 8);
-                    tcpResponse[1] = (byte)(responseLength & 0xFF);
-                    Array.Copy(responseData, 0, tcpResponse, 2, responseLength);
-
-                    await stream.WriteAsync(tcpResponse, 0, tcpResponse.Length);
-                    await stream.FlushAsync();
+                    ArrayPool<byte>.Shared.Return(lengthBuffer);
                 }
             }
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error occurred while processing TCP DNS request");
+        }
+        finally
+        {
+            if (requestBuffer != null)
+                ArrayPool<byte>.Shared.Return(requestBuffer);
+            if (responseBuffer != null)
+                ArrayPool<byte>.Shared.Return(responseBuffer);
         }
     }
 

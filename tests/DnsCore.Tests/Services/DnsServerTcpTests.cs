@@ -23,9 +23,11 @@ public class DnsServerTcpTests
         _mockLogger = new Mock<ILogger<DnsServer>>();
         var recordStoreLogger = new Mock<ILogger<CustomRecordStore>>();
         var resolverLogger = new Mock<ILogger<UpstreamDnsResolver>>();
+        var cacheLogger = new Mock<ILogger<DnsCache>>();
 
         _recordStore = new CustomRecordStore(recordStoreLogger.Object);
-        _upstreamResolver = new UpstreamDnsResolver(resolverLogger.Object);
+        var dnsCache = new DnsCache(cacheLogger.Object);
+        _upstreamResolver = new UpstreamDnsResolver(resolverLogger.Object, dnsCache);
 
         // 使用高端口避免权限问题
         _options = new DnsServerOptions
