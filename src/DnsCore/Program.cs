@@ -3,41 +3,41 @@ using DnsCore.Configuration;
 using DnsCore.Repositories;
 using DnsCore.Services;
 
-// 设置控制台输出编码为 UTF-8（修复 Docker 中文乱码）
+// Set console output encoding to UTF-8 (Fix Docker encoding issues)
 Console.OutputEncoding = Encoding.UTF8;
 Console.InputEncoding = Encoding.UTF8;
 
 Console.WriteLine("========================================");
-Console.WriteLine("      DNS Core Server - DNS 服务器");
+Console.WriteLine("         DNS Core Server");
 Console.WriteLine("========================================");
 Console.WriteLine();
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 配置服务
+// Configure services
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// 配置 JSON 序列化器支持驼峰命名（与前端 JSON 格式匹配）
+// Configure JSON serializer with camel case naming (matches frontend JSON format)
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
     options.SerializerOptions.PropertyNameCaseInsensitive = true;
-    // 支持字符串到枚举的转换（允许前端发送 "A" 而不是数字 1）
+    // Support string to enum conversion (allows frontend to send "A" instead of number 1)
     options.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
 });
 
-// 添加 DNS 服务器配置
+// Add DNS server configuration
 var dnsOptions = builder.Configuration.GetSection("DnsServer").Get<DnsServerOptions>() ?? new();
 builder.Services.AddSingleton(dnsOptions);
 
-// 注册持久化仓储
+// Register persistence repository
 builder.Services.AddSingleton<IDnsRecordRepository>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<Program>>();
     var options = dnsOptions.Persistence;
 
-    logger.LogInformation("配置持久化提供者: {Provider}, 文件路径: {FilePath}",
+    logger.LogInformation("Configured persistence provider: {Provider}, file path: {FilePath}",
         options.Provider, options.FilePath);
 
     return options.Provider switch
@@ -45,11 +45,11 @@ builder.Services.AddSingleton<IDnsRecordRepository>(sp =>
         PersistenceProvider.JsonFile => new JsonFileRepository(options.FilePath),
         PersistenceProvider.Sqlite => new SqliteRepository(options.FilePath),
         PersistenceProvider.LiteDb => new LiteDbRepository(options.FilePath),
-        _ => throw new InvalidOperationException($"不支持的持久化提供者: {options.Provider}")
+        _ => throw new InvalidOperationException($"Unsupported persistence provider: {options.Provider}")
     };
 });
 
-// 注册 DNS 服务
+// Register DNS services
 builder.Services.AddSingleton<CustomRecordStore>();
 builder.Services.AddSingleton<UpstreamDnsResolver>();
 builder.Services.AddSingleton<DnsServer>();
@@ -57,29 +57,29 @@ builder.Services.AddHostedService<DnsServerHostedService>();
 
 var app = builder.Build();
 
-// 加载持久化的 DNS 记录
+// Load persisted DNS records
 var customRecordStore = app.Services.GetRequiredService<CustomRecordStore>();
 await customRecordStore.LoadFromPersistenceAsync();
 
-// 然后加载配置文件中的初始记录（如果有的话）
+// Then load initial records from configuration file (if any)
 if (dnsOptions.CustomRecords.Count > 0)
 {
-    app.Logger.LogInformation("从配置文件加载 {Count} 条初始记录", dnsOptions.CustomRecords.Count);
+    app.Logger.LogInformation("Loaded {Count} initial records from configuration file", dnsOptions.CustomRecords.Count);
     customRecordStore.AddRecords(dnsOptions.CustomRecords);
 }
 
-// 配置中间件
+// Configure middleware
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-// 启用静态文件和默认文件（index.html）
+// Enable static files and default file (index.html)
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-// 健康检查端点
+// Health check endpoint
 app.MapGet("/health", () => Results.Ok(new
 {
     Status = "Healthy",
@@ -88,10 +88,10 @@ app.MapGet("/health", () => Results.Ok(new
 }))
 .WithName("Health Check");
 
-// DNS 管理 API
+// DNS Management API
 var dnsApi = app.MapGroup("/api/dns").WithTags("DNS Management");
 
-// 获取所有自定义记录
+// Get all custom records
 dnsApi.MapGet("/records", (CustomRecordStore store) =>
 {
     var records = store.GetAllRecords();
@@ -99,12 +99,12 @@ dnsApi.MapGet("/records", (CustomRecordStore store) =>
 })
 .WithName("GetAllRecords");
 
-// 添加自定义记录
+// Add custom record
 dnsApi.MapPost("/records", async (DnsCore.Models.DnsRecord record, CustomRecordStore store) =>
 {
     try
     {
-        // 验证必填字段
+        // Validate required fields
         if (string.IsNullOrWhiteSpace(record.Domain))
         {
             return Results.BadRequest(new { error = "Domain is required" });
@@ -130,7 +130,7 @@ dnsApi.MapPost("/records", async (DnsCore.Models.DnsRecord record, CustomRecordS
 })
 .WithName("AddRecord");
 
-// 删除自定义记录
+// Delete custom record
 dnsApi.MapDelete("/records/{domain}/{type}", async (string domain, string type, CustomRecordStore store) =>
 {
     if (!Enum.TryParse<DnsCore.Models.DnsRecordType>(type, ignoreCase: true, out var recordType))
@@ -143,7 +143,7 @@ dnsApi.MapDelete("/records/{domain}/{type}", async (string domain, string type, 
 })
 .WithName("DeleteRecord");
 
-// 查询自定义记录
+// Query custom record
 dnsApi.MapGet("/records/{domain}/{type}", (string domain, string type, CustomRecordStore store) =>
 {
     if (!Enum.TryParse<DnsCore.Models.DnsRecordType>(type, ignoreCase: true, out var recordType))
@@ -156,7 +156,7 @@ dnsApi.MapGet("/records/{domain}/{type}", (string domain, string type, CustomRec
 })
 .WithName("QueryRecord");
 
-// 清空所有自定义记录
+// Clear all custom records
 dnsApi.MapDelete("/records", async (CustomRecordStore store) =>
 {
     await store.ClearAsync();
@@ -164,9 +164,9 @@ dnsApi.MapDelete("/records", async (CustomRecordStore store) =>
 })
 .WithName("ClearAllRecords");
 
-app.Logger.LogInformation("DNS Core Server 正在启动...");
-app.Logger.LogInformation("监听端口: UDP {DnsPort}, HTTP {HttpPort}",
+app.Logger.LogInformation("DNS Core Server is starting...");
+app.Logger.LogInformation("Listening on ports: UDP {DnsPort}, HTTP {HttpPort}",
     dnsOptions.Port, builder.Configuration["ASPNETCORE_URLS"] ?? "http://localhost:5000");
-app.Logger.LogInformation("Web 管理界面: {WebUrl}", builder.Configuration["ASPNETCORE_URLS"] ?? "http://localhost:5000");
+app.Logger.LogInformation("Web management UI: {WebUrl}", builder.Configuration["ASPNETCORE_URLS"] ?? "http://localhost:5000");
 
 await app.RunAsync();

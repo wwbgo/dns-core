@@ -1,7 +1,7 @@
 namespace DnsCore.Services;
 
 /// <summary>
-/// DNS 服务器后台托管服务
+/// DNS server background hosted service
 /// </summary>
 public sealed class DnsServerHostedService(
     DnsServer dnsServer,
@@ -11,19 +11,19 @@ public sealed class DnsServerHostedService(
     {
         try
         {
-            logger.LogInformation("DNS 服务器后台服务正在启动...");
+            logger.LogInformation("DNS server background service is starting...");
             await dnsServer.StartAsync(stoppingToken);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "DNS 服务器运行失败");
+            logger.LogError(ex, "DNS server failed to run");
             throw;
         }
     }
 
     public override Task StopAsync(CancellationToken cancellationToken)
     {
-        logger.LogInformation("DNS 服务器后台服务正在停止...");
+        logger.LogInformation("DNS server background service is stopping...");
         dnsServer.Stop();
         return base.StopAsync(cancellationToken);
     }

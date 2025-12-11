@@ -7,7 +7,7 @@ using System.Net.Sockets;
 namespace DnsCore.Services;
 
 /// <summary>
-/// DNS 服务器
+/// DNS server
 /// </summary>
 public sealed class DnsServer(
     ILogger<DnsServer> logger,
@@ -20,32 +20,32 @@ public sealed class DnsServer(
     private CancellationTokenSource? _cts;
 
     /// <summary>
-    /// 启动 DNS 服务器
+    /// Start DNS server
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            // 加载自定义记录
+            // Load custom records
             customRecordStore.AddRecords(options.CustomRecords);
 
-            // 设置上游 DNS 服务器
+            // Set upstream DNS servers
             upstreamResolver.SetUpstreamServers(options.UpstreamDnsServers);
 
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-            // 创建 UDP 服务器
+            // Create UDP server
             _udpServer = new UdpClient(options.Port);
-            logger.LogInformation("DNS 服务器 UDP 监听启动，端口: {Port}", options.Port);
+            logger.LogInformation("DNS server UDP listener started on port: {Port}", options.Port);
 
-            // 创建 TCP 服务器
+            // Create TCP server
             _tcpServer = new TcpListener(IPAddress.Any, options.Port);
             _tcpServer.Start();
-            logger.LogInformation("DNS 服务器 TCP 监听启动，端口: {Port}", options.Port);
+            logger.LogInformation("DNS server TCP listener started on port: {Port}", options.Port);
 
-            logger.LogInformation("自定义记录数量: {Count}", options.CustomRecords.Count);
+            logger.LogInformation("Custom record count: {Count}", options.CustomRecords.Count);
 
-            // 同时启动 UDP 和 TCP 监听
+            // Start both UDP and TCP listening
             var udpTask = ListenUdpAsync(_cts.Token);
             var tcpTask = ListenTcpAsync(_cts.Token);
 
@@ -53,17 +53,17 @@ public sealed class DnsServer(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "DNS 服务器启动失败");
+            logger.LogError(ex, "DNS server failed to start");
             throw;
         }
     }
 
     /// <summary>
-    /// 停止 DNS 服务器
+    /// Stop DNS server
     /// </summary>
     public void Stop()
     {
-        logger.LogInformation("正在停止 DNS 服务器...");
+        logger.LogInformation("Stopping DNS server...");
 
         _cts?.Cancel();
 
@@ -72,11 +72,11 @@ public sealed class DnsServer(
 
         _tcpServer?.Stop();
 
-        logger.LogInformation("DNS 服务器已停止");
+        logger.LogInformation("DNS server stopped");
     }
 
     /// <summary>
-    /// 监听并处理 UDP DNS 请求
+    /// Listen and process UDP DNS requests
     /// </summary>
     private async Task ListenUdpAsync(CancellationToken cancellationToken)
     {
@@ -86,7 +86,7 @@ public sealed class DnsServer(
             {
                 var result = await _udpServer!.ReceiveAsync(cancellationToken);
 
-                // 异步处理请求，不阻塞接收循环
+                // Process request asynchronously without blocking receive loop
                 _ = Task.Run(() => ProcessUdpRequestAsync(result.Buffer, result.RemoteEndPoint), cancellationToken);
             }
             catch (OperationCanceledException)
@@ -95,13 +95,13 @@ public sealed class DnsServer(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "接收 UDP DNS 请求时发生错误");
+                logger.LogError(ex, "Error occurred while receiving UDP DNS request");
             }
         }
     }
 
     /// <summary>
-    /// 监听并处理 TCP DNS 请求
+    /// Listen and process TCP DNS requests
     /// </summary>
     private async Task ListenTcpAsync(CancellationToken cancellationToken)
     {
@@ -111,7 +111,7 @@ public sealed class DnsServer(
             {
                 var client = await _tcpServer!.AcceptTcpClientAsync(cancellationToken);
 
-                // 异步处理请求，不阻塞接收循环
+                // Process request asynchronously without blocking receive loop
                 _ = Task.Run(() => ProcessTcpClientAsync(client), cancellationToken);
             }
             catch (OperationCanceledException)
@@ -120,13 +120,13 @@ public sealed class DnsServer(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "接收 TCP DNS 请求时发生错误");
+                logger.LogError(ex, "Error occurred while receiving TCP DNS request");
             }
         }
     }
 
     /// <summary>
-    /// 处理 TCP 客户端连接
+    /// Process TCP client connection
     /// </summary>
     private async Task ProcessTcpClientAsync(TcpClient client)
     {
@@ -137,20 +137,20 @@ public sealed class DnsServer(
                 var stream = client.GetStream();
                 var clientEndpoint = client.Client.RemoteEndPoint as IPEndPoint;
 
-                // TCP DNS 消息格式：前2字节是消息长度（大端序）
+                // TCP DNS message format: first 2 bytes are message length (big-endian)
                 var lengthBuffer = new byte[2];
                 var bytesRead = await stream.ReadAsync(lengthBuffer, 0, 2);
 
                 if (bytesRead != 2)
                 {
-                    logger.LogWarning("TCP 请求长度不足，来自 {Client}", clientEndpoint);
+                    logger.LogWarning("TCP request length insufficient, from {Client}", clientEndpoint);
                     return;
                 }
 
-                // 解析消息长度（大端序）
+                // Parse message length (big-endian)
                 var messageLength = (lengthBuffer[0] << 8) | lengthBuffer[1];
 
-                // 读取 DNS 消息
+                // Read DNS message
                 var requestData = new byte[messageLength];
                 var totalRead = 0;
 
@@ -164,18 +164,18 @@ public sealed class DnsServer(
 
                 if (totalRead != messageLength)
                 {
-                    logger.LogWarning("TCP DNS 消息读取不完整，来自 {Client}", clientEndpoint);
+                    logger.LogWarning("TCP DNS message read incomplete, from {Client}", clientEndpoint);
                     return;
                 }
 
-                logger.LogDebug("收到 TCP DNS 查询，长度: {Length} 字节，来自 {Client}", messageLength, clientEndpoint);
+                logger.LogDebug("Received TCP DNS query, length: {Length} bytes, from {Client}", messageLength, clientEndpoint);
 
-                // 处理 DNS 查询
+                // Process DNS query
                 var responseData = await ProcessDnsQueryAsync(requestData, clientEndpoint!, "TCP");
 
                 if (responseData != null)
                 {
-                    // TCP 响应格式：前2字节是消息长度（大端序）+ DNS 消息
+                    // TCP response format: first 2 bytes are message length (big-endian) + DNS message
                     var responseLength = responseData.Length;
                     var tcpResponse = new byte[responseLength + 2];
 
@@ -190,12 +190,12 @@ public sealed class DnsServer(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "处理 TCP DNS 请求时发生错误");
+            logger.LogError(ex, "Error occurred while processing TCP DNS request");
         }
     }
 
     /// <summary>
-    /// 处理 UDP DNS 请求
+    /// Process UDP DNS request
     /// </summary>
     private async Task ProcessUdpRequestAsync(byte[] requestData, IPEndPoint clientEndpoint)
     {
@@ -210,45 +210,45 @@ public sealed class DnsServer(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "处理 UDP DNS 请求时发生错误");
+            logger.LogError(ex, "Error occurred while processing UDP DNS request");
         }
     }
 
     /// <summary>
-    /// 处理 DNS 查询（UDP 和 TCP 共用）
+    /// Process DNS query (shared by UDP and TCP)
     /// </summary>
     private async Task<byte[]?> ProcessDnsQueryAsync(byte[] requestData, IPEndPoint clientEndpoint, string protocol)
     {
         try
         {
-            // 解析请求
+            // Parse request
             var (header, questions) = DnsMessageParser.ParseQuery(requestData);
 
             if (questions.Count == 0)
             {
-                logger.LogWarning("收到无效的 DNS 请求（无问题部分），协议: {Protocol}", protocol);
+                logger.LogWarning("Received invalid DNS request (no question section), protocol: {Protocol}", protocol);
                 return null;
             }
 
             var question = questions[0];
-            logger.LogInformation("收到 DNS 查询 ({Protocol}): {Domain} {Type} 来自 {Client}",
+            logger.LogInformation("Received DNS query ({Protocol}): {Domain} {Type} from {Client}",
                 protocol, question.Name, question.Type, clientEndpoint);
 
-            // 1. 先查询自定义记录
+            // 1. Query custom records first
             var answers = customRecordStore.Query(question.Name, question.Type);
 
             if (answers is { Count: > 0 })
             {
-                logger.LogInformation("使用自定义记录响应 ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
+                logger.LogInformation("Responding with custom record ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
             }
             else
             {
-                // 2. 如果没有找到，查询上游 DNS
-                logger.LogInformation("自定义记录未找到，查询上游 DNS ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
+                // 2. If not found, query upstream DNS
+                logger.LogInformation("Custom record not found, querying upstream DNS ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
                 answers = await upstreamResolver.QueryAsync(question.Name, question.Type, requestData);
             }
 
-            // 3. 构建响应
+            // 3. Build response
             byte[] responseData = answers is { Count: > 0 }
                 ? BuildSuccessResponse(header, questions, answers, question, protocol)
                 : BuildErrorResponse(header, questions, question, protocol);
@@ -257,32 +257,32 @@ public sealed class DnsServer(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "处理 DNS 查询时发生错误，协议: {Protocol}", protocol);
+            logger.LogError(ex, "Error occurred while processing DNS query, protocol: {Protocol}", protocol);
             return null;
         }
     }
 
     /// <summary>
-    /// 构建成功响应
+    /// Build success response
     /// </summary>
     private byte[] BuildSuccessResponse(DnsHeader header, List<DnsQuestion> questions,
         List<DnsRecord> answers, DnsQuestion question, string protocol)
     {
         var response = DnsMessageParser.BuildResponse(header, questions, answers);
-        logger.LogInformation("返回 DNS 响应 ({Protocol}): {Domain} {Type}, {Count} 条记录",
+        logger.LogInformation("Returning DNS response ({Protocol}): {Domain} {Type}, {Count} records",
             protocol, question.Name, question.Type, answers.Count);
         return response;
     }
 
     /// <summary>
-    /// 构建错误响应
+    /// Build error response
     /// </summary>
     private byte[] BuildErrorResponse(DnsHeader header, List<DnsQuestion> questions, DnsQuestion question, string protocol)
     {
         header.SetAsResponse();
         header.Flags |= 0x0003; // RCODE = 3 (NXDOMAIN)
         var response = DnsMessageParser.BuildResponse(header, questions, []);
-        logger.LogWarning("DNS 查询失败，返回 NXDOMAIN ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
+        logger.LogWarning("DNS query failed, returning NXDOMAIN ({Protocol}): {Domain} {Type}", protocol, question.Name, question.Type);
         return response;
     }
 }

@@ -7,16 +7,16 @@ using System.Net.NetworkInformation;
 namespace DnsCore.Services;
 
 /// <summary>
-/// 上游 DNS 解析器
+/// Upstream DNS resolver
 /// </summary>
 public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
 {
     private readonly List<IPAddress> _upstreamServers = [];
-    private const int Timeout = 5000; // 5秒超时
+    private const int Timeout = 5000; // 5 seconds timeout
     private const int DnsPort = 53;
 
     /// <summary>
-    /// 设置上游 DNS 服务器
+    /// Set upstream DNS servers
     /// </summary>
     public void SetUpstreamServers(List<string> servers)
     {
@@ -33,11 +33,11 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
             if (IPAddress.TryParse(server, out var ip))
             {
                 _upstreamServers.Add(ip);
-                logger.LogInformation("添加上游 DNS 服务器: {Server}", server);
+                logger.LogInformation("Added upstream DNS server: {Server}", server);
             }
             else
             {
-                logger.LogWarning("无效的上游 DNS 服务器地址: {Server}", server);
+                logger.LogWarning("Invalid upstream DNS server address: {Server}", server);
             }
         }
 
@@ -48,7 +48,7 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
     }
 
     /// <summary>
-    /// 查询上游 DNS 服务器
+    /// Query upstream DNS servers
     /// </summary>
     public async Task<List<DnsRecord>?> QueryAsync(string domain, DnsRecordType type, byte[] queryData)
     {
@@ -57,36 +57,36 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
 
         if (_upstreamServers.Count == 0)
         {
-            logger.LogWarning("没有可用的上游 DNS 服务器");
+            logger.LogWarning("No available upstream DNS servers");
             return null;
         }
 
-        // 尝试每个上游 DNS 服务器
+        // Try each upstream DNS server
         foreach (var server in _upstreamServers)
         {
             try
             {
-                logger.LogDebug("查询上游 DNS 服务器: {Server} - {Domain} {Type}", server, domain, type);
+                logger.LogDebug("Querying upstream DNS server: {Server} - {Domain} {Type}", server, domain, type);
 
                 var response = await QueryServerAsync(server, queryData);
                 if (response is { Count: > 0 })
                 {
-                    logger.LogInformation("从上游 DNS 服务器获取到响应: {Server} - {Domain} {Type}", server, domain, type);
+                    logger.LogInformation("Received response from upstream DNS server: {Server} - {Domain} {Type}", server, domain, type);
                     return response;
                 }
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "查询上游 DNS 服务器失败: {Server}", server);
+                logger.LogWarning(ex, "Failed to query upstream DNS server: {Server}", server);
             }
         }
 
-        logger.LogWarning("所有上游 DNS 服务器查询失败: {Domain} {Type}", domain, type);
+        logger.LogWarning("All upstream DNS server queries failed: {Domain} {Type}", domain, type);
         return null;
     }
 
     /// <summary>
-    /// 查询单个 DNS 服务器
+    /// Query a single DNS server
     /// </summary>
     private async Task<List<DnsRecord>?> QueryServerAsync(IPAddress server, byte[] queryData)
     {
@@ -96,10 +96,10 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
 
         var endpoint = new IPEndPoint(server, DnsPort);
 
-        // 发送查询
+        // Send query
         await udpClient.SendAsync(queryData, endpoint);
 
-        // 接收响应
+        // Receive response
         using var cts = new CancellationTokenSource(Timeout);
         try
         {
@@ -108,13 +108,13 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
         }
         catch (OperationCanceledException)
         {
-            logger.LogWarning("查询上游 DNS 超时: {Server}", server);
+            logger.LogWarning("Upstream DNS query timeout: {Server}", server);
             return null;
         }
     }
 
     /// <summary>
-    /// 解析上游 DNS 响应
+    /// Parse upstream DNS response
     /// </summary>
     private List<DnsRecord>? ParseUpstreamResponse(byte[] responseData)
     {
@@ -130,13 +130,13 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
             var records = new List<DnsRecord>();
             var offset = 12;
 
-            // 跳过问题部分
+            // Skip question section
             for (var i = 0; i < header.QuestionCount; i++)
             {
                 offset = SkipQuestion(responseData, offset);
             }
 
-            // 读取答案部分
+            // Read answer section
             for (var i = 0; i < header.AnswerCount; i++)
             {
                 (var record, offset) = ParseResourceRecord(responseData, offset);
@@ -150,25 +150,25 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "解析上游 DNS 响应失败");
+            logger.LogError(ex, "Failed to parse upstream DNS response");
             return null;
         }
     }
 
     private static int SkipQuestion(byte[] data, int offset)
     {
-        // 跳过域名
+        // Skip domain name
         offset = SkipDomainName(data, offset);
-        // 跳过 Type 和 Class（各 2 字节）
+        // Skip Type and Class (2 bytes each)
         return offset + 4;
     }
 
     private (DnsRecord? record, int offset) ParseResourceRecord(byte[] data, int offset)
     {
-        // 读取域名
+        // Read domain name
         (var name, offset) = ReadDomainName(data, offset);
 
-        // 读取 Type, Class, TTL, Data Length
+        // Read Type, Class, TTL, Data Length
         var type = (DnsRecordType)ReadUInt16(data, offset);
         offset += 2;
 
@@ -181,7 +181,7 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
         var dataLength = ReadUInt16(data, offset);
         offset += 2;
 
-        // 读取数据
+        // Read data
         var value = type switch
         {
             DnsRecordType.A => ParseIPv4Data(data, offset),
@@ -231,11 +231,11 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
         while (true)
         {
             if (jumps++ > maxJumps)
-                throw new InvalidDataException("DNS 消息压缩过多");
+                throw new InvalidDataException("Too many DNS message compressions");
 
             var length = data[offset];
 
-            // 压缩指针
+            // Compression pointer
             if ((length & 0xC0) == 0xC0)
             {
                 if (!jumped)
@@ -247,14 +247,14 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
                 continue;
             }
 
-            // 域名结束
+            // Domain name end
             if (length == 0)
             {
                 offset++;
                 break;
             }
 
-            // 读取标签
+            // Read label
             offset++;
             var label = System.Text.Encoding.ASCII.GetString(data, offset, length);
             labels.Add(label);
@@ -287,7 +287,7 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
         (uint)((data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3]);
 
     /// <summary>
-    /// 加载系统 DNS 服务器
+    /// Load system DNS servers
     /// </summary>
     private void LoadSystemDnsServers()
     {
@@ -304,22 +304,22 @@ public sealed class UpstreamDnsResolver(ILogger<UpstreamDnsResolver> logger)
 
             if (_upstreamServers.Count > 0)
             {
-                logger.LogInformation("使用系统 DNS 服务器: {Servers}",
+                logger.LogInformation("Using system DNS servers: {Servers}",
                     string.Join(", ", _upstreamServers));
                 return;
             }
 
-            // 如果没有系统 DNS，使用公共 DNS
+            // If no system DNS, use public DNS
             _upstreamServers.AddRange([
                 IPAddress.Parse("8.8.8.8"),    // Google DNS
                 IPAddress.Parse("1.1.1.1")     // Cloudflare DNS
             ]);
 
-            logger.LogInformation("使用默认公共 DNS 服务器: 8.8.8.8, 1.1.1.1");
+            logger.LogInformation("Using default public DNS servers: 8.8.8.8, 1.1.1.1");
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "加载系统 DNS 服务器失败");
+            logger.LogError(ex, "Failed to load system DNS servers");
         }
     }
 }
