@@ -27,7 +27,6 @@ public class DnsServerTcpTests
 
         _recordStore = new CustomRecordStore(recordStoreLogger.Object);
         var dnsCache = new DnsCache(cacheLogger.Object);
-        _upstreamResolver = new UpstreamDnsResolver(resolverLogger.Object, dnsCache);
 
         // 使用高端口避免权限问题
         _options = new DnsServerOptions
@@ -36,6 +35,8 @@ public class DnsServerTcpTests
             CustomRecords = [],
             UpstreamDnsServers = ["8.8.8.8"]
         };
+
+        _upstreamResolver = new UpstreamDnsResolver(resolverLogger.Object, dnsCache, _options);
     }
 
     [Fact]

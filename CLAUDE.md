@@ -19,8 +19,16 @@ DNS Core Server 是一个使用 C# 开发的现代化高性能 DNS 服务器，�
 **性能优化特性:**
 - Span<T> 和 Memory<T> - 零拷贝内存操作
 - ArrayPool<T> - 内存池化减少 GC 压力
-- LRU 缓存 - DNS 查询结果缓存
-- 资源复用 - UdpClient 单例复用
+- O(1) LRU 缓存（双向链表 + 字典）- DNS 查询结果缓存，含否定缓存
+- 上游查询每次使用独立 socket，支持顺序尝试（默认）与并行竞速两种模式
+- 放大的 socket 缓冲 - 避免突发流量下内核丢包
+
+**安全特性:**
+- 管理 API 强制 API Key 鉴权（默认启用）+ 来源网段限制（默认仅本机）
+- DNS 查询客户端网段 ACL（默认仅私有网段，避免成为开放解析器）
+- 按客户端 IP 的令牌桶限流
+- 上游应答校验随机 TXID / 源地址 / question，防缓存投毒
+- 解析器全路径边界检查，畸形报文不产生异常风暴
 
 ## 项目结构
 
@@ -121,6 +129,40 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -o ./publish
 dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained -o ./publish
 ```
 
+### 容器构建（Docker / Podman 通用）
+
+所有容器脚本会自动探测引擎，优先 `docker`，其次 `podman`；
+探测逻辑在 `scripts/container-engine.sh` 与 `scripts/container-engine.bat`。
+
+```bash
+# 自动探测引擎构建
+./docker-build.sh -t v1.0.0
+
+# 强制指定引擎
+CONTAINER_ENGINE=podman ./docker-build.sh
+
+# 交互式容器管理（启停、日志、进入容器、compose）
+./docker-run.sh
+
+# compose（自动选择 podman compose / podman-compose / docker compose）
+DNS_HOST_PORT=5353 WEB_HOST_PORT=8080 podman compose up -d
+```
+
+**Podman 特有差异（脚本已自动处理）：**
+
+1. **镜像格式** —— Podman 默认输出 OCI 格式，`HEALTHCHECK` 是 Docker 格式的
+   扩展，OCI 下会被静默丢弃。脚本对 podman 自动追加 `--format docker`。
+   手工构建需自行加上，否则健康检查失效。
+2. **特权端口** —— 容器以非 root 运行且需绑定 53 端口。镜像对 `dotnet`
+   二进制设置了 `cap_net_bind_service` 文件能力；但 compose 的
+   `no-new-privileges` 会阻止文件能力提升，因此 compose 中另需
+   `cap_add: NET_BIND_SERVICE`（实测：缺失时 bind 抛 SocketException(13)）。
+3. **bind mount 目录** —— Docker 自动创建缺失的挂载源目录，Podman 不会，
+   会报 `statfs .../data: no such file or directory`。仓库保留
+   `data/.gitkeep` 以确保目录存在。
+4. **rootless** —— rootless Podman 无法绑定 53 端口，脚本会检测并提示
+   三种处置方式（放宽 `ip_unprivileged_port_start` / 改用高端口 / rootful）。
+
 ## 项目架构
 
 ### 核心组件
@@ -156,20 +198,40 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
      - 自动索引优化查询性能
 
 5. **UpstreamDnsResolver** (`src/DnsCore/Services/UpstreamDnsResolver.cs`)
-   - 处理上游 DNS 查询
-   - 支持自定义上游服务器或使用系统 DNS
-   - 包含响应解析逻辑
-   - **性能优化**：集成 DNS 缓存，UdpClient 单例复用
+   - 处理上游 DNS 查询，支持自定义上游服务器或使用系统 DNS
+   - **每次查询使用独立且已 Connect 的 socket**
+   - 两种查询模式（`Upstream:RaceUpstreams`）：
+     - `false`（默认）**顺序尝试** — 按列表顺序逐个查询，失败才试下一个，列表次序即优先级
+     - `true` **并行竞速** — 同时查询全部上游，取最先返回的应答
+   - 使用随机 TXID，并校验应答的 TXID / 源地址 / question 是否匹配
+   - 不转发客户端原始报文（避免客户端 TXID 外泄）
+
+5.1 **UpstreamSettingsStore** (`src/DnsCore/Services/UpstreamSettingsStore.cs`)
+   - 上游配置的运行时读写，支持通过 Web 界面/API 修改并**立即生效**（无需重启）
+   - 生效原理：DnsServer 与 UpstreamDnsResolver 在每次查询时读取选项属性
+     （而非构造时快照），因此改写单例 `DnsServerOptions` 即刻影响后续查询
+   - 持久化到 `data/upstream-settings.json`（与 `appsettings.json` 分离：
+     配置文件是部署期初始值，运行时改动写独立文件，避免回写配置文件丢注释、
+     以及与容器只读挂载冲突）
+   - 上游变更后自动清空 DNS 缓存（旧上游的结果可能与新上游不一致）
+   - 校验：拒绝域名、拒绝本机地址（会形成查询环路）、拒绝重复项、
+     **拒绝 inet_aton 简写**（`IPAddress.TryParse("223.5.5")` 会静默解析成
+     `223.5.0.5`，上游少打一位会指向另一台服务器）
 
 6. **DnsCache** (`src/DnsCore/Services/DnsCache.cs`)
-   - **性能优化**：DNS 查询结果缓存（LRU 策略）
-   - 根据 TTL 自动过期
-   - 最大缓存 10,000 条记录
-   - 重复查询响应时间降低 80-95%
+   - O(1) LRU 缓存（双向链表 + 字典）
+   - **返回的 TTL 按剩余存活时间递减**，避免客户端二次缓存过久
+   - 支持否定缓存（NXDOMAIN / NODATA），TTL 上下限可配置
+   - 返回记录副本，防止调用方修改污染缓存
+   - 容量与各项 TTL 通过 `DnsServer:Cache` 配置
 
 7. **DnsCacheCleanupService** (`src/DnsCore/Services/DnsCacheCleanupService.cs`)
-   - **性能优化**：后台服务定期清理过期缓存
-   - 每分钟清理一次
+   - 后台服务定期清理过期缓存，间隔可配置
+
+8. **安全组件**
+   - **ApiSecurityMiddleware** - 管理 API 鉴权（定长时间比较 Key）与来源网段限制
+   - **NetworkAcl** - CIDR 网段匹配，正确处理 IPv4-mapped IPv6
+   - **ClientRateLimiter** - 按客户端 IP 的令牌桶限流，自动回收空闲桶
 
 8. **DnsMessageParser** (`src/DnsCore/Protocol/DnsMessageParser.cs`)
    - DNS 协议解析器
@@ -178,15 +240,26 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
    - **性能优化**：使用 Span<T> 和 ArrayPool<T> 减少内存分配
 
 9. **Web 管理界面** (`src/DnsCore/wwwroot/`)
-   - **index.html** - 现代化的单页应用界面
-   - **styles.css** - 响应式 CSS 样式（渐变背景、卡片设计）
-   - **app.js** - 完整的 CRUD 功能实现
-   - 特性：
-     - 实时显示服务器状态
-     - 可视化添加/删除记录
-     - 实时搜索过滤
-     - 自动刷新（30秒间隔）
-     - 友好的错误提示
+   - **index.html** - 单页应用界面，内联 SVG 图标精灵（不用 emoji，
+     以保证跨平台渲染一致并可随字色变化）
+   - **styles.css** - 设计令牌驱动的样式，深浅双主题
+   - **app.js** - 完整的 CRUD 与配置管理逻辑
+   - **标签页结构**（WAI-ARIA tabs 模式）：
+     - **DNS 记录** — 添加表单 + 记录列表
+     - **上游 DNS** — 转发开关、服务器列表、查询模式、超时
+     - 标签上显示记录数徽标与"未保存改动"圆点（在另一标签页也能看到）
+     - 支持方向键 / Home / End 导航，roving tabindex（Tab 键跳过未选中标签）
+     - 所选标签持久化到 localStorage；未知值回落到默认标签
+   - 其他特性：
+     - 实时状态监控 + 缓存统计（条目数、命中率）
+     - 实时搜索过滤，含结果计数与空状态
+     - 深色主题跟随系统，可手动切换并持久化
+     - 自动刷新（30 秒）；上游面板有未保存改动时不覆盖用户输入
+     - Toast 可堆叠，401 去重（首屏并发请求只提示一次）
+   - **无障碍**：文字对比度达 WCAG AA，交互元素命中区 ≥24px（2.5.8），
+     支持 `prefers-reduced-motion`，键盘焦点可见（`:focus-visible`）
+   - **响应式**：窄屏下表格转为卡片布局（`data-label` 生成行内标签），
+     而非横向滚动
 
 10. **Web API** (`src/DnsCore/Program.cs`)
    - 使用 Minimal API 提供 RESTful 接口
@@ -201,13 +274,20 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
 3. 在 CustomRecordStore 中查找匹配记录
 4. 如果找到，返回自定义记录
 5. 如果未找到且 EnableUpstreamDnsQuery 为 true，使用 UpstreamDnsResolver 转发查询
-   - **先查询缓存**（微秒级响应）
-   - 缓存未命中，查询上游 DNS
-   - 成功：**缓存结果**并返回
-   - 失败：返回 NXDOMAIN
+   - **先查询缓存**（含否定缓存，微秒级响应）
+   - 缓存未命中，按配置的模式查询上游 DNS（默认顺序尝试，可切为并行竞速）
+   - 成功：**缓存结果**并返回，沿用上游 RCODE（区分 NXDOMAIN 与 NODATA），AA 位置 0
+   - 上游全部失败：返回 **SERVFAIL**（服务端故障，不可谎称域名不存在）
 6. 如果未找到且 EnableUpstreamDnsQuery 为 false，返回 SERVFAIL
    - 客户端会自动尝试系统配置的下一个 DNS 服务器
-7. 使用 **ArrayPool** 构建并返回 DNS 响应（减少内存分配）
+7. 构建响应：计数按实际写入量回填、域名压缩、超出 UDP 上限时置 TC 位
+
+**响应构建要点：**
+- 响应头的 AN/NS/AR 计数必须清零后按实际写入量回填。沿用请求头的 ARCOUNT
+  （EDNS0 OPT 会置 1）会让应答自称带附加记录而实际没有，客户端判定报文畸形
+- 泛域名命中时，owner name 必须改写为客户端实际查询的域名，
+  直接写 `*.example.com` 会因 owner 与 question 不匹配而被客户端丢弃
+- 仅本地自定义记录置 AA 位，转发的上游应答不得声称权威
 
 ### Web API 流程
 
@@ -236,13 +316,15 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
 ### Web 管理界面
 
 - `GET /` - Web 管理控制台（index.html）
-- 功能：
-  - 实时状态监控
-  - 添加 DNS 记录表单
-  - 记录列表显示
-  - 搜索过滤功能
-  - 删除记录操作
-  - 清空所有记录
+- 顶部：服务状态、记录数、缓存条目数、缓存命中率四张统计卡片（不随标签切换）
+- **标签页「DNS 记录」**：
+  - 添加记录表单（记录类型切换时联动 placeholder 与提示）
+  - 记录列表（表头吸顶、类型标签着色、泛域名 `*.` 前缀高亮）
+  - 搜索过滤、删除记录、清空所有记录
+- **标签页「上游 DNS」**：
+  - 转发总开关、上游服务器列表（标签式增删 + 常用公共 DNS 快捷添加）
+  - 查询模式（顺序尝试 / 并行竞速）、超时设置
+  - 显示当前实际生效的上游；保存前有"未保存改动"提示与二次确认警示
 
 ### RESTful API 端点
 
@@ -252,11 +334,35 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
 - `GET /api/dns/records/{domain}/{type}` - 查询指定记录
 - `DELETE /api/dns/records/{domain}/{type}` - 删除指定记录
 - `DELETE /api/dns/records` - 清空所有自定义记录
+- `PUT /api/dns/records/{domain}/{type}` - 更新指定记录
+- `GET /api/upstream` - 读取上游 DNS 配置（含实际生效的服务器列表）
+- `PUT /api/upstream` - 修改上游 DNS 配置，**立即生效且持久化**
+- `GET /api/cache/stats` - 缓存统计（条目数、命中率）
+- `DELETE /api/cache` - 清空 DNS 缓存
 - `GET /swagger` - Swagger UI 文档（仅开发模式）
+
+除 `/health` 外，所有 `/api/*` 端点都受 API Key 鉴权与来源网段限制保护。
+
+### 上游 DNS 配置（Web 界面）
+
+Web 管理界面的"上游 DNS 配置"面板可直接修改，保存后立即生效、无需重启：
+
+- **转发总开关** — 关闭后未命中的查询直接返回 SERVFAIL
+- **服务器列表** — 标签式增删，顺序模式下显示优先级序号；提供常用公共 DNS 快捷添加
+- **查询模式** — 顺序尝试 / 并行竞速
+- **超时** — 200–30000 毫秒
+- 面板底部显示**当前实际生效的上游**；列表留空时会标注这些地址来自系统自动探测
 
 ## 测试
 
-项目包含完整的单元测试（**47 个测试用例**），覆盖以下组件：
+项目包含完整的单元测试（**139 个测试用例**，`dotnet test` 全绿），覆盖以下组件：
+- **协议回归测试** - `tests/DnsCore.Tests/Protocol/DnsProtocolRegressionTests.cs`
+  （计数回填、泛域名 owner name、畸形报文、label/域名校验、RCODE、截断、RDATA 编码、压缩）
+- **服务回归测试** - `tests/DnsCore.Tests/Services/ServiceRegressionTests.cs`
+  （缓存 TTL 递减/LRU 淘汰/否定缓存、记录存储并发一致性、网段 ACL、限流）
+- **上游设置测试** - `tests/DnsCore.Tests/Services/UpstreamSettingsTests.cs`
+  （默认顺序模式、IP 严格校验含 inet_aton 简写、环路防护、运行时生效、
+  持久化与重载、损坏/非法持久化文件的容错）
 - DNS 模型（DnsHeader, DnsRecord, DnsQuestion） - `tests/DnsCore.Tests/Models/`
 - DNS 协议解析器（DnsMessageParser） - `tests/DnsCore.Tests/Protocol/`
 - 自定义记录存储（CustomRecordStore） - `tests/DnsCore.Tests/Services/`
@@ -371,11 +477,31 @@ dotnet publish src/DnsCore/DnsCore.csproj -c Release -r win-x64 --self-contained
 - 监听 53 端口需要管理员/root 权限
 - 在 Windows 上运行时必须使用"以管理员身份运行"
 - 自定义记录优先级高于上游 DNS 查询
-- 支持域名压缩指针，遵循 RFC 1035 规范
+- 域名压缩（RFC 1035 §4.1.4）读写双向支持；SRV/SOA 的 target 按规范不压缩
 - **泛域名匹配规则**：
   - 精确匹配 > 最具体泛域名 > 较宽泛泛域名
   - 泛域名不匹配基础域名本身
   - 大小写不敏感
+  - 应答时 owner name 改写为实际查询名
 - HTTP API 默认在 5000 端口，可通过 `ASPNETCORE_URLS` 环境变量修改
 - 所有 API 更改立即生效，无需重启服务器
-- 使用 ConcurrentDictionary 确保线程安全的记录存储
+- 记录存储使用 `ConcurrentDictionary<string, ImmutableList<DnsRecord>>`，
+  整体替换而非原地修改（可变 List 会被写入与查询线程并发访问）
+
+## 安全配置（必读）
+
+**管理 API 默认要求 API Key**，通过环境变量提供：
+
+```bash
+export DNSCORE_API_KEY=<your-key>     # Linux/Mac
+set DNSCORE_API_KEY=<your-key>        # Windows
+```
+
+启用鉴权但未设置 Key 时服务会**拒绝启动**，而不是静默放行管理接口。
+仅在完全可信的隔离网络中才可设置 `ApiSecurity:RequireApiKey=false`。
+
+其他默认值：
+- 管理 API 来源限制：仅 `127.0.0.1` / `::1`
+- DNS 查询客户端限制：仅私有网段（放开 `AllowedClientNetworks` 前请确认不会成为开放解析器）
+- 单 IP 限流：1000 QPS
+- 逐查询日志默认关闭（`LogEveryQuery`），开启会记录所有客户端的查询历史
