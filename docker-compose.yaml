@@ -19,13 +19,17 @@ services:
     restart: unless-stopped
 
     # 端口映射
+    # 宿主端口可通过环境变量覆盖，便于避开已占用的 53 端口，
+    # 或在 rootless Podman 下改用非特权端口：
+    #   DNS_HOST_PORT=5353 WEB_HOST_PORT=8080 <compose> up -d
     ports:
       # DNS 服务端口 (UDP)
-      - "53:53/udp"
-      # DNS 服务端口 (TCP) - 可选
-      - "53:53/tcp"
+      - "${DNS_HOST_PORT:-53}:53/udp"
+      # DNS 服务端口 (TCP)：应答超过 512 字节时客户端会改用 TCP 重试，
+      # 不映射会导致这类查询失败，因此不是可选项
+      - "${DNS_HOST_PORT:-53}:53/tcp"
       # Web 管理界面和 API
-      - "5000:5000"
+      - "${WEB_HOST_PORT:-5000}:5000"
 
     # 环境变量
     environment:
@@ -87,6 +91,14 @@ services:
     # 安全配置
     security_opt:
       - no-new-privileges:true
+
+    # 容器以非 root 用户运行，而 DNS 需绑定 53 端口（<1024）。
+    # 镜像已对 dotnet 二进制设置 cap_net_bind_service 文件能力，但
+    # no-new-privileges 会阻止文件能力提升生效（实测：带该选项时 bind
+    # 抛 SocketException(13)，不带则正常）。这里显式授予该项能力，
+    # 从而既保留 no-new-privileges 的加固，又能绑定特权端口。
+    cap_add:
+      - NET_BIND_SERVICE
 
     # 只读根文件系统（可选，需要配置临时目录）
     # read_only: true

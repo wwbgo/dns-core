@@ -1,20 +1,36 @@
-@echo off
-REM DNS Core Server - Docker 运行脚本 (Windows)
+﻿@echo off
+REM 切换到 UTF-8 代码页：本文件以 UTF-8 保存，
+REM 若按系统 ANSI 代码页(中文 Windows 为 GBK)解析，中文会乱码并破坏 if/( 结构。
+chcp 65001 >nul 2>&1
+REM DNS Core Server - 容器运行脚本 (Windows)
 REM 用于快速启动、停止和管理 DNS 服务器容器
+REM 自动适配 Docker 或 Podman
+REM
+REM 环境变量:
+REM   CONTAINER_ENGINE  强制指定容器引擎 (podman 或 docker)
+REM   DNS_PORT          DNS 端口映射 (默认 53)
+REM   WEB_PORT          Web 管理端口 (默认 5000)
 
 setlocal enabledelayedexpansion
+
+REM 探测容器引擎（docker 或 podman）
+call "%~dp0scripts\container-engine.bat"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 
 REM 设置容器名称和镜像
 set CONTAINER_NAME=dns-core-server
 set IMAGE_NAME=dns-core-server:latest
-set DNS_PORT=53
-set WEB_PORT=5000
+if not defined DNS_PORT set DNS_PORT=53
+if not defined WEB_PORT set WEB_PORT=5000
 
 REM 显示主菜单
 :menu
 cls
 echo ========================================
-echo DNS Core Server - Docker 管理
+echo DNS Core Server - 容器管理 (%ENGINE_NAME%)
 echo ========================================
 echo.
 echo 请选择操作:
@@ -26,8 +42,8 @@ echo   4. 查看状态 (status)
 echo   5. 查看日志 (logs)
 echo   6. 进入容器 (exec)
 echo   7. 删除容器 (remove)
-echo   8. 使用 Docker Compose 启动
-echo   9. 使用 Docker Compose 停止
+echo   8. 使用 Compose 启动
+echo   9. 使用 Compose 停止
 echo   0. 退出
 echo.
 set /p choice="请输入选项 (0-9): "
@@ -50,15 +66,16 @@ echo [启动容器] %CONTAINER_NAME%
 echo.
 
 REM 检查容器是否已存在
-docker ps -a --filter "name=%CONTAINER_NAME%" --format "{{.Names}}" | findstr /x "%CONTAINER_NAME%" >nul
+%ENGINE% ps -a --filter "name=%CONTAINER_NAME%" --format "{{.Names}}" | findstr /x "%CONTAINER_NAME%" >nul
 if %errorlevel% equ 0 (
     echo 容器已存在，正在启动...
-    docker start %CONTAINER_NAME%
+    %ENGINE% start %CONTAINER_NAME%
 ) else (
     echo 创建并启动新容器...
-    docker run -d ^
+    %ENGINE% run -d ^
         --name %CONTAINER_NAME% ^
         -p %DNS_PORT%:53/udp ^
+        -p %DNS_PORT%:53/tcp ^
         -p %WEB_PORT%:5000 ^
         --restart unless-stopped ^
         %IMAGE_NAME%
@@ -83,7 +100,7 @@ goto :menu
 echo.
 echo [停止容器] %CONTAINER_NAME%
 echo.
-docker stop %CONTAINER_NAME%
+%ENGINE% stop %CONTAINER_NAME%
 if %errorlevel% equ 0 (
     echo [成功] 容器已停止！
 ) else (
@@ -97,7 +114,7 @@ goto :menu
 echo.
 echo [重启容器] %CONTAINER_NAME%
 echo.
-docker restart %CONTAINER_NAME%
+%ENGINE% restart %CONTAINER_NAME%
 if %errorlevel% equ 0 (
     echo [成功] 容器已重启！
 ) else (
@@ -111,15 +128,15 @@ goto :menu
 echo.
 echo [容器状态]
 echo.
-docker ps -a --filter "name=%CONTAINER_NAME%"
+%ENGINE% ps -a --filter "name=%CONTAINER_NAME%"
 echo.
 echo [容器详细信息]
-docker inspect %CONTAINER_NAME% --format "{{.State.Status}}" 2>nul
+%ENGINE% inspect %CONTAINER_NAME% --format "{{.State.Status}}" 2>nul
 if %errorlevel% neq 0 (
     echo 容器不存在
 ) else (
-    docker inspect %CONTAINER_NAME% --format "启动时间: {{.State.StartedAt}}"
-    docker inspect %CONTAINER_NAME% --format "运行状态: {{.State.Status}}"
+    %ENGINE% inspect %CONTAINER_NAME% --format "启动时间: {{.State.StartedAt}}"
+    %ENGINE% inspect %CONTAINER_NAME% --format "运行状态: {{.State.Status}}"
 )
 echo.
 pause
@@ -129,17 +146,17 @@ goto :menu
 echo.
 echo [容器日志] (按 Ctrl+C 退出)
 echo.
-docker logs -f --tail 50 %CONTAINER_NAME%
+%ENGINE% logs -f --tail 50 %CONTAINER_NAME%
 goto :menu
 
 :exec_container
 echo.
 echo [进入容器] %CONTAINER_NAME%
 echo.
-docker exec -it %CONTAINER_NAME% /bin/bash
+%ENGINE% exec -it %CONTAINER_NAME% /bin/bash
 if %errorlevel% neq 0 (
     echo 尝试使用 sh...
-    docker exec -it %CONTAINER_NAME% /bin/sh
+    %ENGINE% exec -it %CONTAINER_NAME% /bin/sh
 )
 goto :menu
 
@@ -149,8 +166,8 @@ echo [删除容器] %CONTAINER_NAME%
 echo.
 set /p confirm="确认删除容器? (y/n): "
 if /i "%confirm%"=="y" (
-    docker stop %CONTAINER_NAME% 2>nul
-    docker rm %CONTAINER_NAME%
+    %ENGINE% stop %CONTAINER_NAME% 2>nul
+    %ENGINE% rm %CONTAINER_NAME%
     if %errorlevel% equ 0 (
         echo [成功] 容器已删除！
     ) else (
@@ -167,7 +184,7 @@ goto :menu
 echo.
 echo [Docker Compose] 启动服务
 echo.
-docker-compose up -d
+%COMPOSE% up -d
 if %errorlevel% equ 0 (
     echo.
     echo [成功] 服务已启动！
@@ -185,7 +202,7 @@ goto :menu
 echo.
 echo [Docker Compose] 停止服务
 echo.
-docker-compose down
+%COMPOSE% down
 if %errorlevel% equ 0 (
     echo [成功] 服务已停止！
 ) else (

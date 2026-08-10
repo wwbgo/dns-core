@@ -1,6 +1,12 @@
 #!/bin/bash
-# DNS Core Server - Docker 运行脚本 (Linux/Mac)
+# DNS Core Server - 容器运行脚本 (Linux/Mac)
 # 用于快速启动、停止和管理 DNS 服务器容器
+# 自动适配 Docker 或 Podman
+#
+# 环境变量:
+#   CONTAINER_ENGINE  强制指定容器引擎 (podman 或 docker)
+#   DNS_PORT          DNS 端口映射 (默认 53；rootless podman 建议改用 5353)
+#   WEB_PORT          Web 管理端口 (默认 5000)
 
 set -e
 
@@ -11,17 +17,24 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# 配置
+# 引入容器引擎探测
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/container-engine.sh
+source "${SCRIPT_DIR}/scripts/container-engine.sh"
+
+detect_engine || exit 1
+
+# 配置（端口可通过环境变量覆盖）
 CONTAINER_NAME="dns-core-server"
 IMAGE_NAME="dns-core-server:latest"
-DNS_PORT=53
-WEB_PORT=5000
+DNS_PORT="${DNS_PORT:-53}"
+WEB_PORT="${WEB_PORT:-5000}"
 
 # 显示菜单
 show_menu() {
     clear
     echo -e "${BLUE}========================================"
-    echo "DNS Core Server - Docker 管理"
+    echo "DNS Core Server - 容器管理 (${ENGINE_NAME})"
     echo -e "========================================${NC}"
     echo ""
     echo "请选择操作:"
@@ -33,8 +46,8 @@ show_menu() {
     echo "  5. 查看日志 (logs)"
     echo "  6. 进入容器 (exec)"
     echo "  7. 删除容器 (remove)"
-    echo "  8. 使用 Docker Compose 启动"
-    echo "  9. 使用 Docker Compose 停止"
+    echo "  8. 使用 Compose 启动"
+    echo "  9. 使用 Compose 停止"
     echo "  0. 退出"
     echo ""
     read -p "请输入选项 (0-9): " choice
@@ -46,14 +59,19 @@ start_container() {
     echo -e "${GREEN}[启动容器]${NC} $CONTAINER_NAME"
     echo ""
 
-    if docker ps -a --filter "name=$CONTAINER_NAME" --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+    warn_if_rootless_privileged_port "$DNS_PORT"
+
+    if "$ENGINE" ps -a --filter "name=$CONTAINER_NAME" --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
         echo "容器已存在，正在启动..."
-        docker start "$CONTAINER_NAME"
+        "$ENGINE" start "$CONTAINER_NAME"
     else
         echo "创建并启动新容器..."
-        docker run -d \
+        # DNS 需要同时监听 UDP 与 TCP：超过 512 字节的应答会置 TC 位，
+        # 客户端随后改用 TCP 重试，只映射 UDP 会导致这类查询失败
+        "$ENGINE" run -d \
             --name "$CONTAINER_NAME" \
             -p "${DNS_PORT}:53/udp" \
+            -p "${DNS_PORT}:53/tcp" \
             -p "${WEB_PORT}:5000" \
             --restart unless-stopped \
             "$IMAGE_NAME"
@@ -77,7 +95,7 @@ stop_container() {
     echo -e "${YELLOW}[停止容器]${NC} $CONTAINER_NAME"
     echo ""
 
-    docker stop "$CONTAINER_NAME"
+    "$ENGINE" stop "$CONTAINER_NAME"
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}[成功]${NC} 容器已停止！"
@@ -91,7 +109,7 @@ restart_container() {
     echo -e "${YELLOW}[重启容器]${NC} $CONTAINER_NAME"
     echo ""
 
-    docker restart "$CONTAINER_NAME"
+    "$ENGINE" restart "$CONTAINER_NAME"
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}[成功]${NC} 容器已重启！"
@@ -104,13 +122,13 @@ restart_container() {
 show_status() {
     echo -e "${BLUE}[容器状态]${NC}"
     echo ""
-    docker ps -a --filter "name=$CONTAINER_NAME"
+    "$ENGINE" ps -a --filter "name=$CONTAINER_NAME"
     echo ""
 
     echo -e "${BLUE}[容器详细信息]${NC}"
-    if docker inspect "$CONTAINER_NAME" &>/dev/null; then
-        echo -e "${YELLOW}启动时间:${NC} $(docker inspect "$CONTAINER_NAME" --format '{{.State.StartedAt}}')"
-        echo -e "${YELLOW}运行状态:${NC} $(docker inspect "$CONTAINER_NAME" --format '{{.State.Status}}')"
+    if "$ENGINE" inspect "$CONTAINER_NAME" &>/dev/null; then
+        echo -e "${YELLOW}启动时间:${NC} $("$ENGINE" inspect "$CONTAINER_NAME" --format '{{.State.StartedAt}}')"
+        echo -e "${YELLOW}运行状态:${NC} $("$ENGINE" inspect "$CONTAINER_NAME" --format '{{.State.Status}}')"
     else
         echo "容器不存在"
     fi
@@ -120,7 +138,7 @@ show_status() {
 show_logs() {
     echo -e "${BLUE}[容器日志]${NC} (按 Ctrl+C 退出)"
     echo ""
-    docker logs -f --tail 50 "$CONTAINER_NAME"
+    "$ENGINE" logs -f --tail 50 "$CONTAINER_NAME"
 }
 
 # 进入容器
@@ -128,9 +146,9 @@ exec_container() {
     echo -e "${BLUE}[进入容器]${NC} $CONTAINER_NAME"
     echo ""
 
-    if ! docker exec -it "$CONTAINER_NAME" /bin/bash; then
+    if ! "$ENGINE" exec -it "$CONTAINER_NAME" /bin/bash; then
         echo "尝试使用 sh..."
-        docker exec -it "$CONTAINER_NAME" /bin/sh
+        "$ENGINE" exec -it "$CONTAINER_NAME" /bin/sh
     fi
 }
 
@@ -142,8 +160,8 @@ remove_container() {
     read -p "确认删除容器? (y/n): " confirm
 
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        docker stop "$CONTAINER_NAME" 2>/dev/null || true
-        docker rm "$CONTAINER_NAME"
+        "$ENGINE" stop "$CONTAINER_NAME" 2>/dev/null || true
+        "$ENGINE" rm "$CONTAINER_NAME"
 
         if [ $? -eq 0 ]; then
             echo -e "${GREEN}[成功]${NC} 容器已删除！"
@@ -155,12 +173,12 @@ remove_container() {
     fi
 }
 
-# 使用 Docker Compose 启动
+# 使用 Compose 启动
 compose_up() {
-    echo -e "${GREEN}[Docker Compose]${NC} 启动服务"
+    echo -e "${GREEN}[Compose]${NC} 启动服务 ($(compose_display))"
     echo ""
 
-    docker-compose up -d
+    compose_cmd up -d
 
     if [ $? -eq 0 ]; then
         echo ""
@@ -173,12 +191,12 @@ compose_up() {
     fi
 }
 
-# 使用 Docker Compose 停止
+# 使用 Compose 停止
 compose_down() {
-    echo -e "${YELLOW}[Docker Compose]${NC} 停止服务"
+    echo -e "${YELLOW}[Compose]${NC} 停止服务 ($(compose_display))"
     echo ""
 
-    docker-compose down
+    compose_cmd down
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}[成功]${NC} 服务已停止！"
