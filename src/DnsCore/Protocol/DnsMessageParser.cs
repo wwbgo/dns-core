@@ -1,229 +1,250 @@
 using DnsCore.Models;
-using System.Buffers;
 
 namespace DnsCore.Protocol;
 
 /// <summary>
-/// DNS 消息解析器（性能优化版）
+/// DNS 消息解析与构建。
+/// 所有解析路径都做严格边界检查，畸形报文抛 InvalidDataException。
 /// </summary>
-public sealed class DnsMessageParser
+public static class DnsMessageParser
 {
     /// <summary>
-    /// 解析 DNS 查询消息（性能优化：使用 ReadOnlySpan）
+    /// 解析 DNS 查询（兼容旧签名）
     /// </summary>
     public static (DnsHeader header, List<DnsQuestion> questions) ParseQuery(byte[] data)
         => ParseQuery(data.AsSpan());
 
     /// <summary>
-    /// 解析 DNS 查询消息（Span 版本）
+    /// 解析 DNS 查询（Span 版本，兼容旧签名）
     /// </summary>
     public static (DnsHeader header, List<DnsQuestion> questions) ParseQuery(ReadOnlySpan<byte> data)
     {
-        var header = DnsHeader.FromBytes(data, 0);
-        List<DnsQuestion> questions = [];
+        var query = Parse(data);
+        return (query.Header, query.Questions);
+    }
 
-        var offset = 12; // DNS header 是 12 字节
+    /// <summary>
+    /// 完整解析 DNS 查询，包含 EDNS0 OPT 记录信息
+    /// </summary>
+    public static DnsQuery Parse(ReadOnlySpan<byte> data)
+    {
+        var header = DnsHeader.FromBytes(data);
+
+        // QDCOUNT 完全由客户端控制，原实现直接循环 65535 次导致越界读取
+        if (header.QuestionCount > DnsLimits.MaxQuestionCount)
+            throw new InvalidDataException($"DNS question 数量异常: {header.QuestionCount}");
+
+        var reader = new DnsReader(data) { Position = DnsHeader.Size };
+        List<DnsQuestion> questions = new(header.QuestionCount);
 
         for (var i = 0; i < header.QuestionCount; i++)
         {
-            (var name, offset) = ReadDomainName(data, offset);
+            var name = reader.ReadDomainName();
+            var type = (DnsRecordType)reader.ReadUInt16();
+            var classValue = reader.ReadUInt16();
 
-            var type = (DnsRecordType)ReadUInt16(data, offset);
-            offset += 2;
-
-            var classValue = ReadUInt16(data, offset);
-            offset += 2;
-
-            questions.Add(new DnsQuestion
-            {
-                Name = name,
-                Type = type,
-                Class = classValue
-            });
+            questions.Add(new DnsQuestion { Name = name, Type = type, Class = classValue });
         }
 
-        return (header, questions);
+        var edns = TryReadEdns(ref reader, header);
+
+        return new DnsQuery { Header = header, Questions = questions, Edns = edns };
     }
 
     /// <summary>
-    /// 构建 DNS 响应消息
+    /// 在 additional 区寻找 OPT 伪记录。解析失败不影响主流程，只是退化为无 EDNS。
     /// </summary>
-    public static byte[] BuildResponse(DnsHeader header, List<DnsQuestion> questions, List<DnsRecord> answers)
+    private static EdnsInfo? TryReadEdns(ref DnsReader reader, DnsHeader header)
     {
-        using var ms = new MemoryStream();
+        if (header.AdditionalCount == 0)
+            return null;
 
-        // 写入响应头
-        header.SetAsResponse();
-        header.SetRecursionAvailable();
-        header.AnswerCount = (ushort)answers.Count;
-        ms.Write(header.ToBytes());
-
-        // 写入问题部分
-        foreach (var question in questions)
-        {
-            WriteDomainName(ms, question.Name);
-            WriteUInt16(ms, (ushort)question.Type);
-            WriteUInt16(ms, question.Class);
-        }
-
-        // 写入答案部分
-        foreach (var answer in answers)
-        {
-            WriteDomainName(ms, answer.Domain);
-            WriteUInt16(ms, (ushort)answer.Type);
-            WriteUInt16(ms, 1); // Class: IN
-            WriteUInt32(ms, (uint)answer.TTL);
-
-            // 根据记录类型写入数据
-            byte[] rdata = answer.Type switch
-            {
-                DnsRecordType.A => ParseIPv4(answer.Value),
-                DnsRecordType.AAAA => ParseIPv6(answer.Value),
-                DnsRecordType.CNAME or DnsRecordType.NS or DnsRecordType.PTR => EncodeDomainName(answer.Value),
-                DnsRecordType.TXT => EncodeTxtRecord(answer.Value),
-                _ => Array.Empty<byte>()
-            };
-
-            WriteUInt16(ms, (ushort)rdata.Length);
-            ms.Write(rdata);
-        }
-
-        return ms.ToArray();
-    }
-
-    /// <summary>
-    /// 读取域名（支持压缩）- 性能优化：使用 Span
-    /// </summary>
-    private static (string name, int offset) ReadDomainName(ReadOnlySpan<byte> data, int offset)
-    {
-        // 使用 ArrayPool 来复用 label 缓冲区
-        char[]? labelBuffer = null;
         try
         {
-            List<string> labels = [];
-            var jumped = false;
-            var jumpOffset = offset;
-            const int maxJumps = 5;
-            var jumps = 0;
+            // 跳过 answer 与 authority 区
+            for (var i = 0; i < header.AnswerCount + header.AuthorityCount; i++)
+                SkipResourceRecord(ref reader);
 
-            while (true)
+            for (var i = 0; i < header.AdditionalCount; i++)
             {
-                var length = data[offset];
+                reader.SkipDomainName();
+                var type = (DnsRecordType)reader.ReadUInt16();
+                var payloadSize = reader.ReadUInt16();   // OPT 中 CLASS 字段复用为 UDP payload size
+                var ttlField = reader.ReadUInt32();      // OPT 中 TTL 字段为 extended-rcode + flags
+                var rdLength = reader.ReadUInt16();
+                reader.Skip(rdLength);
 
-                // 压缩指针
-                if ((length & 0xC0) == 0xC0)
+                if (type == DnsRecordType.OPT)
                 {
-                    if (jumps++ > maxJumps)
-                        throw new InvalidDataException("DNS 消息压缩过多");
-
-                    if (!jumped)
-                        jumpOffset = offset + 2;
-
-                    var pointer = ((length & 0x3F) << 8) | data[offset + 1];
-                    offset = pointer;
-                    jumped = true;
-                    continue;
+                    return new EdnsInfo
+                    {
+                        UdpPayloadSize = payloadSize,
+                        DnssecOk = (ttlField & 0x8000) != 0
+                    };
                 }
-
-                // 域名结束
-                if (length == 0)
-                {
-                    offset++;
-                    break;
-                }
-
-                // 读取标签 - 使用 ArrayPool 优化
-                offset++;
-                if (labelBuffer == null || labelBuffer.Length < length)
-                {
-                    if (labelBuffer != null)
-                        ArrayPool<char>.Shared.Return(labelBuffer);
-                    labelBuffer = ArrayPool<char>.Shared.Rent(length);
-                }
-
-                // 使用 Span 进行 ASCII 解码
-                var labelSpan = data.Slice(offset, length);
-                for (int i = 0; i < length; i++)
-                {
-                    labelBuffer[i] = (char)labelSpan[i];
-                }
-
-                labels.Add(new string(labelBuffer, 0, length));
-                offset += length;
             }
-
-            return (string.Join('.', labels), jumped ? jumpOffset : offset);
         }
-        finally
+        catch (InvalidDataException)
         {
-            if (labelBuffer != null)
-                ArrayPool<char>.Shared.Return(labelBuffer);
+            // additional 区畸形：忽略 EDNS，按传统 512 字节处理
         }
+
+        return null;
+    }
+
+    private static void SkipResourceRecord(ref DnsReader reader)
+    {
+        reader.SkipDomainName();
+        reader.Skip(2 + 2 + 4);              // TYPE + CLASS + TTL
+        var rdLength = reader.ReadUInt16();
+        reader.Skip(rdLength);
     }
 
     /// <summary>
-    /// 写入域名
+    /// 构建 DNS 响应（兼容旧签名：权威应答、不做 UDP 截断）
     /// </summary>
-    private static void WriteDomainName(Stream stream, string domain)
-    {
-        if (string.IsNullOrEmpty(domain))
+    public static byte[] BuildResponse(DnsHeader header, List<DnsQuestion> questions, List<DnsRecord> answers)
+        => BuildResponse(new DnsResponseBuildRequest
         {
-            stream.WriteByte(0);
-            return;
+            Header = header,
+            Questions = questions,
+            Answers = answers,
+            IsAuthoritative = true,
+            MaxSize = DnsLimits.MaxMessageSize
+        });
+
+    /// <summary>
+    /// 构建 DNS 响应。
+    /// </summary>
+    public static byte[] BuildResponse(DnsResponseBuildRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var header = request.Header;
+        var answers = request.Answers ?? [];
+
+        header.SetAsResponse(request.IsAuthoritative);
+        header.SetRecursionAvailable();
+        header.SetResponseCode(request.ResponseCode);
+
+        // 关键：清零计数后再按实际写入量回填。
+        // 沿用请求头的 ARCOUNT（EDNS0 OPT 会置 1）会让应答自称带附加记录而实际没有。
+        header.ClearCounts();
+        header.QuestionCount = (ushort)(request.Questions?.Count ?? 0);
+
+        var writer = new DnsWriter(512);
+        writer.WriteHeader(header);
+
+        foreach (var question in request.Questions ?? [])
+        {
+            writer.WriteDomainName(question.Name);
+            writer.WriteUInt16((ushort)question.Type);
+            writer.WriteUInt16(question.Class);
         }
 
-        var labels = domain.Split('.');
-        foreach (var label in labels)
+        var written = 0;
+        var truncated = false;
+
+        foreach (var answer in answers)
         {
-            byte[] bytes = System.Text.Encoding.ASCII.GetBytes(label);
-            stream.WriteByte((byte)bytes.Length);
-            stream.Write(bytes);
+            var checkpoint = writer.Position;
+
+            try
+            {
+                WriteResourceRecord(writer, answer);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or InvalidOperationException)
+            {
+                // 单条记录编码失败不应毁掉整个应答：回滚该条继续
+                writer.Rewind(checkpoint);
+                continue;
+            }
+
+            // 超出本次允许的报文上限：回滚并置 TC 位，客户端据此改用 TCP
+            if (writer.Position > request.MaxSize)
+            {
+                writer.Rewind(checkpoint);
+                truncated = true;
+                break;
+            }
+
+            written++;
         }
-        stream.WriteByte(0);
+
+        // 若请求带 EDNS0，应答也需带 OPT 记录
+        if (request.IncludeEdnsOpt)
+        {
+            var checkpoint = writer.Position;
+            WriteOptRecord(writer, request.EdnsPayloadSize);
+
+            if (writer.Position > request.MaxSize)
+                writer.Rewind(checkpoint);
+            else
+                header.AdditionalCount = 1;
+        }
+
+        header.AnswerCount = (ushort)written;
+        if (truncated)
+            header.SetTruncated();
+
+        // 回填头部（计数与标志位在写入答案后才最终确定）
+        writer.PatchHeader(header);
+
+        return writer.ToArray();
     }
 
-    private static byte[] EncodeDomainName(string domain)
+    private static void WriteResourceRecord(DnsWriter writer, DnsRecord record)
     {
-        using var ms = new MemoryStream();
-        WriteDomainName(ms, domain);
-        return ms.ToArray();
+        writer.WriteDomainName(record.Domain);
+        writer.WriteUInt16((ushort)record.Type);
+        writer.WriteUInt16(1); // CLASS = IN
+        writer.WriteUInt32((uint)Math.Max(0, record.TTL));
+
+        // 先占位 RDLENGTH，写完 RDATA 再回填实际长度
+        var lengthOffset = writer.Position;
+        writer.WriteUInt16(0);
+
+        var rdataStart = writer.Position;
+        DnsRdataWriter.Write(writer, record.Type, record.Value);
+        var rdataLength = writer.Position - rdataStart;
+
+        if (rdataLength > ushort.MaxValue)
+            throw new InvalidOperationException($"RDATA 超长: {rdataLength}");
+
+        writer.PatchUInt16(lengthOffset, (ushort)rdataLength);
     }
 
-    private static byte[] EncodeTxtRecord(string text)
+    /// <summary>写入 EDNS0 OPT 伪记录（RFC 6891）</summary>
+    private static void WriteOptRecord(DnsWriter writer, int payloadSize)
     {
-        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
-        var result = new byte[bytes.Length + 1];
-        result[0] = (byte)bytes.Length;
-        Array.Copy(bytes, 0, result, 1, bytes.Length);
-        return result;
+        writer.WriteByte(0);                                    // 根域名
+        writer.WriteUInt16((ushort)DnsRecordType.OPT);
+        writer.WriteUInt16((ushort)Math.Clamp(
+            payloadSize, DnsLimits.MaxUdpMessageSize, DnsLimits.MaxEdnsPayloadSize)); // UDP payload size
+        writer.WriteUInt32(0);                                  // extended RCODE + flags
+        writer.WriteUInt16(0);                                  // RDLENGTH
     }
+}
 
-    private static byte[] ParseIPv4(string ip)
-    {
-        var parts = ip.Split('.');
-        if (parts.Length != 4)
-            throw new ArgumentException($"无效的 IPv4 地址: {ip}");
+/// <summary>
+/// 构建响应所需的参数
+/// </summary>
+public sealed class DnsResponseBuildRequest
+{
+    public required DnsHeader Header { get; init; }
+    public required List<DnsQuestion> Questions { get; init; }
+    public List<DnsRecord>? Answers { get; init; }
 
-        return [.. parts.Select(byte.Parse)];
-    }
+    /// <summary>是否权威应答：仅本地自定义记录为 true</summary>
+    public bool IsAuthoritative { get; init; }
 
-    private static byte[] ParseIPv6(string ip) =>
-        System.Net.IPAddress.Parse(ip).GetAddressBytes();
+    public DnsResponseCode ResponseCode { get; init; } = DnsResponseCode.NoError;
 
-    private static ushort ReadUInt16(ReadOnlySpan<byte> data, int offset) =>
-        (ushort)((data[offset] << 8) | data[offset + 1]);
+    /// <summary>报文字节上限；UDP 下为客户端可接收的大小，超出则置 TC 位</summary>
+    public int MaxSize { get; init; } = DnsLimits.MaxMessageSize;
 
-    private static void WriteUInt16(Stream stream, ushort value)
-    {
-        stream.WriteByte((byte)(value >> 8));
-        stream.WriteByte((byte)(value & 0xFF));
-    }
+    /// <summary>请求带 EDNS0 时，应答需回带 OPT 记录</summary>
+    public bool IncludeEdnsOpt { get; init; }
 
-    private static void WriteUInt32(Stream stream, uint value)
-    {
-        stream.WriteByte((byte)(value >> 24));
-        stream.WriteByte((byte)(value >> 16));
-        stream.WriteByte((byte)(value >> 8));
-        stream.WriteByte((byte)(value & 0xFF));
-    }
+    public int EdnsPayloadSize { get; init; } = DnsLimits.MaxEdnsPayloadSize;
 }
