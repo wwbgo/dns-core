@@ -1,39 +1,51 @@
+using DnsCore.Configuration;
+
 namespace DnsCore.Services;
 
 /// <summary>
-/// DNS 缓存清理后台服务
+/// DNS 缓存过期清理后台服务
 /// </summary>
 public sealed class DnsCacheCleanupService(
     ILogger<DnsCacheCleanupService> logger,
-    DnsCache dnsCache) : BackgroundService
+    DnsCache dnsCache,
+    DnsServerOptions options) : BackgroundService
 {
-    private readonly TimeSpan _cleanupInterval = TimeSpan.FromMinutes(1);
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("DNS cache cleanup service started");
-
-        while (!stoppingToken.IsCancellationRequested)
+        if (!options.Cache.Enabled)
         {
-            try
-            {
-                await Task.Delay(_cleanupInterval, stoppingToken);
-
-                dnsCache.CleanupExpired();
-
-                var (total, active) = dnsCache.GetStats();
-                logger.LogDebug("Cache stats - Total: {Total}, Active: {Active}", total, active);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error in DNS cache cleanup service");
-            }
+            logger.LogInformation("缓存已禁用，清理服务不启动");
+            return;
         }
 
-        logger.LogInformation("DNS cache cleanup service stopped");
+        var interval = TimeSpan.FromSeconds(Math.Max(5, options.Cache.CleanupIntervalSeconds));
+        logger.LogInformation("DNS 缓存清理服务已启动，间隔 {Interval}s", interval.TotalSeconds);
+
+        using var timer = new PeriodicTimer(interval);
+
+        try
+        {
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+            {
+                try
+                {
+                    dnsCache.CleanupExpired();
+
+                    var stats = dnsCache.GetStats();
+                    logger.LogDebug("缓存统计 - 总计: {Total}, 有效: {Active}, 命中率: {HitRate:P1}",
+                        stats.TotalEntries, stats.ActiveEntries, stats.HitRate);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "DNS 缓存清理出错");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常停机
+        }
+
+        logger.LogInformation("DNS 缓存清理服务已停止");
     }
 }

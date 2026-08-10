@@ -81,6 +81,12 @@ tests/PersistenceTest/
 
 # 持久化数据文件
 data/
+# 但保留占位文件：compose 以 bind mount 挂载 ./data，
+# Podman 不会自动创建缺失的挂载源目录（Docker 会），
+# 目录不存在时容器直接创建失败。
+!data/
+data/*
+!data/.gitkeep
 *.db
 *.litedb
 dns-records.json

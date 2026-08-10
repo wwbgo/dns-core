@@ -1,4 +1,7 @@
-@echo off
+﻿@echo off
+REM 切换到 UTF-8 代码页：本文件以 UTF-8 保存，
+REM 若按系统 ANSI 代码页(中文 Windows 为 GBK)解析，中文会乱码并破坏 if/( 结构。
+chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
 
 REM DNS Core Server - Docker 构建脚本 (Windows)
@@ -71,31 +74,38 @@ echo 镜像名称: !FULL_IMAGE_NAME!:%IMAGE_TAG%
 echo 构建时间: %date% %time%
 echo.
 
-REM 检查 Docker 是否安装
-where docker >nul 2>nul
-if %errorlevel% neq 0 (
-    echo [错误] 未找到 Docker 命令！
-    echo 请先安装 Docker Desktop: https://www.docker.com/products/docker-desktop
-    exit /b 1
-)
+REM 探测容器引擎（docker 或 podman）
+call "%~dp0scripts\container-engine.bat"
+if errorlevel 1 exit /b 1
 
-REM 检查 Dockerfile 是否存在
-if not exist "Dockerfile" (
-    echo [错误] 未找到 Dockerfile 文件！
+echo 容器引擎: %ENGINE_NAME%
+echo.
+
+REM 检查构建文件是否存在（Dockerfile 或 Containerfile）
+set "CONTAINERFILE="
+if exist "Dockerfile" set "CONTAINERFILE=Dockerfile"
+if not defined CONTAINERFILE if exist "Containerfile" set "CONTAINERFILE=Containerfile"
+if not defined CONTAINERFILE (
+    echo [错误] 未找到 Dockerfile 或 Containerfile！
     echo 请确保在项目根目录下运行此脚本。
     echo 当前目录: %CD%
     exit /b 1
 )
 
-REM 构建 Docker 镜像
-echo [步骤 1/3] 开始构建 Docker 镜像...
+REM 生成 ISO 8601 UTC 时间戳，写入 OCI 标签 org.opencontainers.image.created。
+REM 不用 %date%/%time%：其格式随系统区域设置变化，且是本地时间而非 UTC。
+for /f %%i in ('powershell -NoProfile -Command "(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')"') do set "BUILD_DATE=%%i"
+if not defined BUILD_DATE set "BUILD_DATE=unknown"
+
+REM 构建镜像
+echo [步骤 1/3] 开始构建镜像（使用 %ENGINE_NAME%, !CONTAINERFILE!）...
 echo.
 
-docker build --tag "!FULL_IMAGE_NAME!:%IMAGE_TAG%" --tag "!FULL_IMAGE_NAME!:latest" --file Dockerfile .
+%ENGINE% build %ENGINE_BUILD_ARGS% --tag "!FULL_IMAGE_NAME!:%IMAGE_TAG%" --tag "!FULL_IMAGE_NAME!:latest" --build-arg BUILD_DATE=!BUILD_DATE! --build-arg VERSION=%IMAGE_TAG% --file "!CONTAINERFILE!" .
 
 if %errorlevel% neq 0 (
     echo.
-    echo [错误] Docker 镜像构建失败！
+    echo [错误] 镜像构建失败！
     echo 错误代码: %errorlevel%
     exit /b 1
 )
@@ -106,7 +116,7 @@ echo.
 
 REM 显示镜像信息
 echo [步骤 3/3] 镜像信息:
-docker images "!FULL_IMAGE_NAME!"
+%ENGINE% images "!FULL_IMAGE_NAME!"
 echo.
 
 REM 推送镜像到仓库
@@ -121,13 +131,13 @@ if /i "!PUSH!"=="true" (
 
         REM 推送指定标签
         echo 推送: !FULL_IMAGE_NAME!:!IMAGE_TAG!
-        docker push "!FULL_IMAGE_NAME!:!IMAGE_TAG!"
+        %ENGINE% push "!FULL_IMAGE_NAME!:!IMAGE_TAG!"
 
         if %errorlevel% neq 0 (
             echo.
             echo [错误] 镜像推送失败！
             echo 请确保:
-            echo   1. 已登录到镜像仓库: docker login
+            echo   1. 已登录到镜像仓库: %ENGINE% login
             echo   2. 有推送权限
             echo   3. 网络连接正常
             exit /b 1
@@ -136,7 +146,7 @@ if /i "!PUSH!"=="true" (
         REM 如果 TAG 不是 latest，也推送 latest 标签
         if not "!IMAGE_TAG!"=="latest" (
             echo 推送: !FULL_IMAGE_NAME!:latest
-            docker push "!FULL_IMAGE_NAME!:latest"
+            %ENGINE% push "!FULL_IMAGE_NAME!:latest"
         )
 
         echo.
@@ -152,10 +162,10 @@ echo.
 echo 镜像标签: !FULL_IMAGE_NAME!:%IMAGE_TAG%
 echo.
 echo 运行容器:
-echo   docker run -d -p 53:53/udp -p 5000:5000 --name dns-core !FULL_IMAGE_NAME!:%IMAGE_TAG%
+echo   %ENGINE% run -d -p 53:53/udp -p 53:53/tcp -p 5000:5000 --name dns-core !FULL_IMAGE_NAME!:%IMAGE_TAG%
 echo.
-echo 或使用 docker-compose:
-echo   docker-compose up -d
+echo 或使用 compose:
+echo   %COMPOSE% up -d
 echo.
 echo 访问地址:
 echo   Web 管理界面: http://localhost:5000
@@ -172,6 +182,10 @@ echo   -r, --registry REGISTRY 指定镜像仓库前缀 (例如: docker.io/usern
 echo   -p, --push              构建后自动推送到镜像仓库
 echo   -h, --help              显示此帮助信息
 echo.
+echo 环境变量:
+echo   CONTAINER_ENGINE        强制指定容器引擎 (podman 或 docker)
+echo                           默认自动探测：优先 docker，其次 podman
+echo.
 echo 示例:
 echo   # 仅构建镜像
 echo   docker-build.bat
@@ -186,7 +200,7 @@ echo   # 构建并推送到私有仓库
 echo   docker-build.bat -r registry.example.com/myproject -t latest --push
 echo.
 echo 注意:
-echo   - 推送前需要先登录: docker login [registry]
+echo   - 推送前需要先登录: %ENGINE% login [registry]
 echo   - 如果使用 --push 但未指定 -r，将跳过推送步骤
 echo.
 exit /b 0

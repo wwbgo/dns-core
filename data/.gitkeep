@@ -1,0 +1,5 @@
+# 占位文件，确保 data/ 目录在克隆后即存在。
+#
+# compose 以 bind mount 方式挂载 ./data：
+# Docker 会自动创建缺失的挂载源目录，但 Podman 不会，会直接报
+# "statfs .../data: no such file or directory" 并拒绝创建容器。

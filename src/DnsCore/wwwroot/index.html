@@ -3,100 +3,405 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="description" content="DNS Core Server 管理控制台 - 管理自定义 DNS 记录">
     <title>DNS Core Server - 管理控制台</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🌐 DNS Core Server</h1>
-            <p class="subtitle">DNS 记录管理控制台</p>
+    <!-- SVG 图标精灵：替代 emoji，保证跨平台渲染一致、可随字色变化 -->
+    <svg class="sprite" aria-hidden="true" focusable="false">
+        <symbol id="i-globe" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18"/>
+        </symbol>
+        <symbol id="i-refresh" viewBox="0 0 24 24">
+            <path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>
+        </symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+        <symbol id="i-trash" viewBox="0 0 24 24">
+            <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/>
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="7"/><path d="M20 20l-4.3-4.3"/>
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+        </symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z"/></symbol>
+        <symbol id="i-database" viewBox="0 0 24 24">
+            <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>
+        </symbol>
+        <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+        <symbol id="i-key" viewBox="0 0 24 24">
+            <circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3l1 1-2 2 2 2-3 3-2-2-4.2 4.2"/>
+        </symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24">
+            <path d="M12 3l9 16H3l9-16zM12 9v5"/><circle cx="12" cy="17" r=".6" fill="currentColor"/>
+        </symbol>
+        <symbol id="i-info" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".6" fill="currentColor"/>
+        </symbol>
+        <symbol id="i-inbox" viewBox="0 0 24 24">
+            <path d="M3 12h5l2 3h4l2-3h5M4 12l2-7h12l2 7v7H4v-7z"/>
+        </symbol>
+        <symbol id="i-upstream" viewBox="0 0 24 24">
+            <path d="M12 20v-6M12 14l-6 3M12 14l6 3M12 14V4"/>
+            <circle cx="12" cy="3" r="1.6"/><circle cx="5" cy="18" r="1.6"/><circle cx="19" cy="18" r="1.6"/>
+        </symbol>
+        <symbol id="i-grip" viewBox="0 0 24 24">
+            <circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/>
+            <circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/>
+            <circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/>
+            <circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/>
+            <circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/>
+            <circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>
+        </symbol>
+    </svg>
+
+    <a class="skip-link" href="#main">跳转到主要内容</a>
+
+    <div class="app">
+        <!-- 顶栏 -->
+        <header class="topbar">
+            <div class="topbar__brand">
+                <span class="brand__mark" aria-hidden="true">
+                    <svg><use href="#i-globe"/></svg>
+                </span>
+                <span class="brand__text">
+                    <strong>DNS Core Server</strong>
+                    <small>记录管理控制台</small>
+                </span>
+            </div>
+
+            <div class="topbar__actions">
+                <span id="apiKeyBadge" class="key-badge" hidden>
+                    <svg aria-hidden="true"><use href="#i-key"/></svg>
+                    <span>已配置密钥</span>
+                </span>
+                <button id="apiKeyBtn" class="btn btn--ghost btn--icon" type="button"
+                        title="设置 API 密钥" aria-label="设置 API 密钥">
+                    <svg aria-hidden="true"><use href="#i-key"/></svg>
+                </button>
+                <button id="themeBtn" class="btn btn--ghost btn--icon" type="button"
+                        title="切换深色/浅色主题" aria-label="切换主题">
+                    <svg class="icon-light" aria-hidden="true"><use href="#i-moon"/></svg>
+                    <svg class="icon-dark" aria-hidden="true"><use href="#i-sun"/></svg>
+                </button>
+                <button id="refreshBtn" class="btn btn--secondary" type="button">
+                    <svg aria-hidden="true"><use href="#i-refresh"/></svg>
+                    <span>刷新</span>
+                </button>
+            </div>
         </header>
 
-        <!-- 状态栏 -->
-        <div class="status-bar">
-            <div class="status-item">
-                <span class="status-label">服务状态:</span>
-                <span id="serverStatus" class="status-value loading">检查中...</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">记录总数:</span>
-                <span id="recordCount" class="status-value">0</span>
-            </div>
-            <div class="status-item">
-                <button id="refreshBtn" class="btn btn-secondary">🔄 刷新</button>
-            </div>
-        </div>
+        <main id="main">
+            <!-- 统计卡片 -->
+            <section class="stats" aria-label="服务状态概览">
+                <article class="stat">
+                    <span class="stat__icon stat__icon--status" aria-hidden="true">
+                        <svg><use href="#i-activity"/></svg>
+                    </span>
+                    <div class="stat__body">
+                        <span class="stat__label">服务状态</span>
+                        <span id="serverStatus" class="stat__value is-loading" role="status">检查中</span>
+                    </div>
+                </article>
 
-        <!-- 操作面板 -->
-        <div class="panel">
-            <h2>📝 添加 DNS 记录</h2>
-            <div class="info-box">
-                <strong>💡 提示:</strong> 支持泛域名记录，使用 <code>*.example.com</code> 格式可匹配所有子域名
+                <article class="stat">
+                    <span class="stat__icon stat__icon--records" aria-hidden="true">
+                        <svg><use href="#i-database"/></svg>
+                    </span>
+                    <div class="stat__body">
+                        <span class="stat__label">自定义记录</span>
+                        <span id="recordCount" class="stat__value">0</span>
+                    </div>
+                </article>
+
+                <article class="stat">
+                    <span class="stat__icon stat__icon--cache" aria-hidden="true">
+                        <svg><use href="#i-inbox"/></svg>
+                    </span>
+                    <div class="stat__body">
+                        <span class="stat__label">缓存条目</span>
+                        <span id="cacheEntries" class="stat__value">—</span>
+                    </div>
+                </article>
+
+                <article class="stat">
+                    <span class="stat__icon stat__icon--hit" aria-hidden="true">
+                        <svg><use href="#i-check"/></svg>
+                    </span>
+                    <div class="stat__body">
+                        <span class="stat__label">缓存命中率</span>
+                        <span id="cacheHitRate" class="stat__value">—</span>
+                    </div>
+                </article>
+            </section>
+
+            <!-- 标签导航 -->
+            <div class="tabs" role="tablist" aria-label="管理功能">
+                <button type="button" class="tab is-active" role="tab" id="tab-records"
+                        aria-controls="panel-records" aria-selected="true">
+                    <svg aria-hidden="true"><use href="#i-database"/></svg>
+                    <span>DNS 记录</span>
+                    <span class="tab__badge" id="tabRecordBadge">0</span>
+                </button>
+                <button type="button" class="tab" role="tab" id="tab-upstream"
+                        aria-controls="panel-upstream" aria-selected="false" tabindex="-1">
+                    <svg aria-hidden="true"><use href="#i-upstream"/></svg>
+                    <span>上游 DNS</span>
+                    <span class="tab__dot" id="tabUpstreamDot" hidden
+                          title="有未保存的修改" aria-label="有未保存的修改"></span>
+                </button>
             </div>
-            <form id="addRecordForm">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="domain">域名 * <span class="label-hint">(支持泛域名 *.example.com)</span></label>
-                        <input type="text" id="domain" name="domain" placeholder="example.local 或 *.example.local" required>
+
+            <!-- ===== 标签页：DNS 记录 ===== -->
+            <div class="tabpanel" role="tabpanel" id="panel-records" aria-labelledby="tab-records" tabindex="0">
+
+            <!-- 添加记录 -->
+            <section class="panel">
+                <div class="panel__head">
+                    <h2 class="panel__title">
+                        <svg aria-hidden="true"><use href="#i-plus"/></svg>
+                        添加 DNS 记录
+                    </h2>
+                </div>
+
+                <div class="callout">
+                    <svg aria-hidden="true"><use href="#i-info"/></svg>
+                    <p>支持泛域名记录，使用 <code>*.example.com</code> 可匹配所有子域名。
+                       匹配优先级：精确记录 &gt; 最具体泛域名 &gt; 较宽泛泛域名。</p>
+                </div>
+
+                <form id="addRecordForm" novalidate>
+                    <div class="form-grid">
+                        <div class="field field--wide">
+                            <label for="domain">域名 <span class="req" aria-hidden="true">*</span></label>
+                            <input type="text" id="domain" name="domain" required
+                                   autocomplete="off" spellcheck="false"
+                                   placeholder="example.local 或 *.example.local"
+                                   aria-describedby="domainHint">
+                            <small id="domainHint" class="field__hint">支持泛域名 *.example.com</small>
+                        </div>
+
+                        <div class="field">
+                            <label for="type">记录类型 <span class="req" aria-hidden="true">*</span></label>
+                            <div class="select-wrap">
+                                <select id="type" name="type" required>
+                                    <option value="A">A — IPv4 地址</option>
+                                    <option value="AAAA">AAAA — IPv6 地址</option>
+                                    <option value="CNAME">CNAME — 别名</option>
+                                    <option value="TXT">TXT — 文本</option>
+                                    <option value="NS">NS — 名称服务器</option>
+                                    <option value="MX">MX — 邮件交换</option>
+                                    <option value="SRV">SRV — 服务定位</option>
+                                    <option value="PTR">PTR — 指针</option>
+                                    <option value="CAA">CAA — 证书授权</option>
+                                </select>
+                                <svg class="select-wrap__arrow" aria-hidden="true" viewBox="0 0 24 24">
+                                    <path d="M6 9l6 6 6-6"/>
+                                </svg>
+                            </div>
+                        </div>
+
+                        <div class="field field--wide">
+                            <label for="value">记录值 <span class="req" aria-hidden="true">*</span></label>
+                            <input type="text" id="value" name="value" required
+                                   autocomplete="off" spellcheck="false"
+                                   placeholder="192.168.1.100"
+                                   aria-describedby="valueHint">
+                            <small id="valueHint" class="field__hint">A 记录填 IPv4 地址</small>
+                        </div>
+
+                        <div class="field">
+                            <label for="ttl">TTL <span class="field__unit">秒</span></label>
+                            <input type="number" id="ttl" name="ttl" value="3600" min="1" max="86400">
+                            <small class="field__hint">缓存有效期</small>
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label for="type">记录类型 *</label>
-                        <select id="type" name="type" required>
-                            <option value="A">A (IPv4)</option>
-                            <option value="AAAA">AAAA (IPv6)</option>
-                            <option value="CNAME">CNAME (别名)</option>
-                            <option value="TXT">TXT (文本)</option>
-                            <option value="NS">NS (名称服务器)</option>
-                            <option value="MX">MX (邮件交换)</option>
-                            <option value="PTR">PTR (指针)</option>
-                        </select>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn--primary">
+                            <svg aria-hidden="true"><use href="#i-plus"/></svg>
+                            <span>添加记录</span>
+                        </button>
+                        <button type="button" id="clearAllBtn" class="btn btn--danger-soft">
+                            <svg aria-hidden="true"><use href="#i-trash"/></svg>
+                            <span>清空所有记录</span>
+                        </button>
                     </div>
-                    <div class="form-group">
-                        <label for="value">记录值 *</label>
-                        <input type="text" id="value" name="value" placeholder="192.168.1.100" required>
+                </form>
+            </section>
+
+            <!-- 记录列表 -->
+            <section class="panel">
+                <div class="panel__head">
+                    <h2 class="panel__title">
+                        <svg aria-hidden="true"><use href="#i-database"/></svg>
+                        DNS 记录列表
+                    </h2>
+                    <span id="filterCount" class="panel__meta" role="status"></span>
+                </div>
+
+                <div class="search">
+                    <svg class="search__icon" aria-hidden="true"><use href="#i-search"/></svg>
+                    <input type="search" id="searchInput" placeholder="搜索域名、类型或记录值"
+                           autocomplete="off" aria-label="搜索记录">
+                    <button type="button" id="searchClear" class="search__clear" hidden aria-label="清除搜索">
+                        <svg aria-hidden="true"><use href="#i-x"/></svg>
+                    </button>
+                </div>
+
+                <div class="table-wrap">
+                    <table id="recordsTable">
+                        <caption class="sr-only">自定义 DNS 记录列表</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">域名</th>
+                                <th scope="col">类型</th>
+                                <th scope="col">记录值</th>
+                                <th scope="col" class="num">TTL</th>
+                                <th scope="col" class="col-actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recordsBody">
+                            <tr class="state-row">
+                                <td colspan="5"><span class="spinner" aria-hidden="true"></span> 加载中…</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            </div>
+
+            <!-- ===== 标签页：上游 DNS ===== -->
+            <div class="tabpanel" role="tabpanel" id="panel-upstream"
+                 aria-labelledby="tab-upstream" tabindex="0" hidden>
+
+            <!-- 上游 DNS 配置 -->
+            <section class="panel">
+                <div class="panel__head">
+                    <h2 class="panel__title">
+                        <svg aria-hidden="true"><use href="#i-upstream"/></svg>
+                        上游 DNS 配置
+                    </h2>
+                    <span id="upstreamState" class="panel__meta" role="status"></span>
+                </div>
+
+                <form id="upstreamForm" novalidate>
+                    <!-- 转发总开关 -->
+                    <label class="switch" for="enableUpstream">
+                        <input type="checkbox" id="enableUpstream" name="enableUpstream" role="switch">
+                        <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+                        <span class="switch__text">
+                            <strong>自定义记录未命中时转发上游</strong>
+                            <small>关闭后将直接返回 SERVFAIL，由客户端自行尝试下一个 DNS 服务器</small>
+                        </span>
+                    </label>
+
+                    <fieldset id="upstreamFields" class="upstream-fields">
+                        <legend class="sr-only">上游服务器设置</legend>
+
+                        <div class="field">
+                            <label for="serverInput">上游服务器</label>
+                            <div class="chip-input">
+                                <div id="serverChips" class="chip-input__chips" role="list"></div>
+                                <!-- 顺序变化对读屏用户不可见，需要显式播报 -->
+                                <span id="orderLive" class="sr-only" role="status" aria-live="polite"></span>
+                                <div class="chip-input__row">
+                                    <input type="text" id="serverInput" inputmode="numeric"
+                                           autocomplete="off" spellcheck="false"
+                                           placeholder="输入 IP 后回车，如 223.5.5.5"
+                                           aria-describedby="serverHint">
+                                    <button type="button" id="addServerBtn" class="btn btn--secondary btn--sm">
+                                        <svg aria-hidden="true"><use href="#i-plus"/></svg>
+                                        <span>添加</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <small id="serverHint" class="field__hint">
+                                只接受 IP 地址（不支持域名）。留空则自动使用本机系统 DNS。
+                            </small>
+                        </div>
+
+                        <div class="quick-add">
+                            <span class="quick-add__label">快捷添加</span>
+                            <button type="button" class="chip chip--add" data-ip="223.5.5.5">阿里 223.5.5.5</button>
+                            <button type="button" class="chip chip--add" data-ip="119.29.29.29">腾讯 119.29.29.29</button>
+                            <button type="button" class="chip chip--add" data-ip="180.76.76.76">百度 180.76.76.76</button>
+                            <button type="button" class="chip chip--add" data-ip="1.1.1.1">Cloudflare 1.1.1.1</button>
+                            <button type="button" class="chip chip--add" data-ip="8.8.8.8">Google 8.8.8.8</button>
+                        </div>
+
+                        <div class="form-grid">
+                            <div class="field field--wide">
+                                <label for="raceMode">查询模式</label>
+                                <div class="select-wrap">
+                                    <select id="raceMode" name="raceMode">
+                                        <option value="false">顺序尝试 — 按列表顺序，失败才试下一个</option>
+                                        <option value="true">并行竞速 — 同时查询全部，取最快应答</option>
+                                    </select>
+                                    <svg class="select-wrap__arrow" aria-hidden="true" viewBox="0 0 24 24">
+                                        <path d="M6 9l6 6 6-6"/>
+                                    </svg>
+                                </div>
+                                <small class="field__hint" id="raceHint">顺序模式下，列表次序即优先级</small>
+                            </div>
+
+                            <div class="field">
+                                <label for="upstreamTimeout">超时 <span class="field__unit">毫秒</span></label>
+                                <input type="number" id="upstreamTimeout" name="upstreamTimeout"
+                                       min="200" max="30000" step="100" value="3000">
+                                <small class="field__hint">200–30000</small>
+                            </div>
+                        </div>
+                    </fieldset>
+
+                    <div class="callout callout--warn" id="upstreamWarn" hidden>
+                        <svg aria-hidden="true"><use href="#i-alert"/></svg>
+                        <p>修改上游会改变所有客户端的解析结果，保存后 DNS 缓存将被清空。</p>
                     </div>
-                    <div class="form-group">
-                        <label for="ttl">TTL (秒)</label>
-                        <input type="number" id="ttl" name="ttl" value="3600" min="60" max="86400">
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn--primary" id="saveUpstreamBtn">
+                            <svg aria-hidden="true"><use href="#i-check"/></svg>
+                            <span>保存并生效</span>
+                        </button>
+                        <button type="button" class="btn btn--secondary" id="resetUpstreamBtn">
+                            <svg aria-hidden="true"><use href="#i-refresh"/></svg>
+                            <span>放弃修改</span>
+                        </button>
+                    </div>
+                </form>
+
+                <div class="effective" id="effectiveBox" hidden>
+                    <svg aria-hidden="true"><use href="#i-info"/></svg>
+                    <div>
+                        <strong>当前生效的上游</strong>
+                        <span id="effectiveList"></span>
                     </div>
                 </div>
-                <div class="form-actions">
-                    <button type="submit" class="btn btn-primary">➕ 添加记录</button>
-                    <button type="button" id="clearAllBtn" class="btn btn-danger">🗑️ 清空所有记录</button>
-                </div>
-            </form>
-        </div>
+            </section>
 
-        <!-- 记录列表 -->
-        <div class="panel">
-            <h2>📋 DNS 记录列表</h2>
-            <div class="search-box">
-                <input type="text" id="searchInput" placeholder="🔍 搜索域名或值...">
             </div>
-            <div class="table-container">
-                <table id="recordsTable">
-                    <thead>
-                        <tr>
-                            <th>域名</th>
-                            <th>类型</th>
-                            <th>记录值</th>
-                            <th>TTL</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-                    <tbody id="recordsBody">
-                        <tr class="loading-row">
-                            <td colspan="5">加载中...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
 
-        <!-- 提示消息 -->
-        <div id="toast" class="toast"></div>
+        </main>
+
+        <footer class="footer">
+            <span>DNS Core Server</span>
+            <span class="footer__sep" aria-hidden="true">·</span>
+            <a href="/swagger" target="_blank" rel="noopener">API 文档</a>
+            <span class="footer__sep" aria-hidden="true">·</span>
+            <a href="/health" target="_blank" rel="noopener">健康检查</a>
+        </footer>
     </div>
+
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="false"></div>
 
     <script src="app.js"></script>
 </body>

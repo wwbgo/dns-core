@@ -1,15 +1,89 @@
-# DNS Core Server - Docker 部署指南
+# DNS Core Server - 容器部署指南
 
-本文档介绍如何使用 Docker 部署和运行 DNS Core Server。
+本文档介绍如何使用容器部署和运行 DNS Core Server。
+
+**支持 Docker 与 Podman**：所有脚本会自动探测本机可用的容器引擎，
+无需修改即可在两者上运行。探测优先级为 `docker` > `podman`，
+可用环境变量 `CONTAINER_ENGINE` 强制指定。
 
 ## 📋 目录
 
+- [容器引擎兼容性](#容器引擎兼容性)
 - [快速开始](#快速开始)
 - [构建镜像](#构建镜像)
 - [运行容器](#运行容器)
-- [使用 Docker Compose](#使用-docker-compose)
+- [使用 Compose](#使用-docker-compose)
 - [配置说明](#配置说明)
 - [常见问题](#常见问题)
+
+## 容器引擎兼容性
+
+### 自动探测
+
+`docker-build.sh` / `docker-run.sh` / `docker-build.bat` / `docker-run.bat`
+均通过 `scripts/container-engine.{sh,bat}` 探测引擎：
+
+| 情况 | 使用的引擎 |
+|---|---|
+| 同时装有 docker 与 podman | docker |
+| 仅装 podman | podman |
+| 设置 `CONTAINER_ENGINE=podman` | podman（强制） |
+| 两者都没有 | 报错并给出安装指引 |
+
+Compose 命令同样自动探测，依次尝试：
+`podman compose` → `podman-compose`（podman）、
+`docker compose` → `docker-compose`（docker）。
+
+```bash
+# 强制使用 podman 构建
+CONTAINER_ENGINE=podman ./docker-build.sh -t v1.0.0
+```
+
+```batch
+REM Windows 下强制使用 podman
+set CONTAINER_ENGINE=podman
+docker-build.bat
+```
+
+### Podman 相关注意事项
+
+**镜像格式**：Podman 默认输出 OCI 格式，而 `HEALTHCHECK` 属于 Docker
+镜像格式的扩展，OCI 下会被静默丢弃（仅一条 warning）。构建脚本已自动
+为 podman 追加 `--format docker`，以保留健康检查。手工构建时需自行加上：
+
+```bash
+podman build --format docker -t dns-core-server:latest .
+```
+
+**特权端口**：容器内以非 root 用户运行，DNS 需绑定 53 端口。镜像已对
+`dotnet` 二进制设置 `cap_net_bind_service` 文件能力；compose 中还显式
+声明了 `cap_add: NET_BIND_SERVICE`，因为 `no-new-privileges` 会阻止
+文件能力提升生效。
+
+若使用 **rootless** Podman，宿主侧无法绑定 53 端口，可选：
+
+```bash
+# 方式 1：放宽内核限制（一次性，需 root）
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=53
+
+# 方式 2：改用高端口
+DNS_HOST_PORT=5353 podman compose up -d
+
+# 方式 3：使用 rootful podman
+sudo -E ./docker-run.sh
+```
+
+**bind mount 目录**：compose 将 `./data` 挂载进容器。Docker 会自动创建
+缺失的挂载源目录，**Podman 不会**，目录不存在时直接报
+`statfs .../data: no such file or directory`。仓库已包含 `data/.gitkeep`
+以确保该目录存在；若被误删，手工创建即可：
+
+```bash
+mkdir -p data
+```
+
+**Containerfile**：Podman 惯用 `Containerfile` 命名，但也能直接读取
+`Dockerfile`。本项目只保留 `Dockerfile`，脚本会自动识别两者中存在的那个。
 
 ## 🚀 快速开始
 
@@ -48,6 +122,11 @@ docker-compose logs -f
 # 停止服务
 docker-compose down
 ```
+
+> **Podman 用户**：下文示例统一使用 `docker` 命令。Podman 的 CLI 与 Docker
+> 兼容，把 `docker` 换成 `podman`、`docker-compose` 换成 `podman compose` 即可。
+> 手工 `podman build` 时请追加 `--format docker` 以保留 HEALTHCHECK。
+> 使用项目自带脚本则无需关心差异，脚本会自动探测引擎。
 
 ## 🔨 构建镜像
 
