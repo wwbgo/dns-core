@@ -1,27 +1,28 @@
 using DnsCore.Models;
 using DnsCore.Repositories;
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 
 namespace DnsCore.Services;
 
 /// <summary>
-/// Custom DNS record store
+/// 自定义 DNS 记录存储。
+/// value 使用 ImmutableList 并整体替换：原实现把可变 List 放进 ConcurrentDictionary，
+/// 写入线程 list.Add 与查询线程复制会并发访问同一个非线程安全的 List。
 /// </summary>
 public sealed class CustomRecordStore(
     ILogger<CustomRecordStore> logger,
     IDnsRecordRepository? repository = null)
 {
-    private readonly ConcurrentDictionary<string, List<DnsRecord>> _records = new();
+    private readonly ConcurrentDictionary<string, ImmutableList<DnsRecord>> _records = new();
     private readonly SemaphoreSlim _persistLock = new(1, 1);
 
-    /// <summary>
-    /// Load records from persistence storage
-    /// </summary>
+    /// <summary>从持久化存储加载记录</summary>
     public async Task LoadFromPersistenceAsync()
     {
         if (repository is null)
         {
-            logger.LogDebug("Persistence storage not configured, skipping load");
+            logger.LogDebug("未配置持久化存储，跳过加载");
             return;
         }
 
@@ -29,50 +30,43 @@ public sealed class CustomRecordStore(
         {
             var records = await repository.LoadAllAsync();
 
-            // Group by key and deduplicate based on Domain + Type + Value
-            var deduplicated = records
+            var grouped = records
+                .Where(r => r is not null)
                 .GroupBy(r => GetKey(r.Domain, r.Type))
                 .ToDictionary(
                     g => g.Key,
-                    g => g.DistinctBy(r => new { r.Domain, r.Type, r.Value, r.TTL }).ToList()
-                );
+                    // DnsRecord 是 record 类型，Distinct 直接按值语义去重
+                    g => g.Distinct().ToImmutableList());
 
-            // Clear and reload with deduplicated records
             _records.Clear();
-            foreach (var kvp in deduplicated)
-            {
-                _records[kvp.Key] = kvp.Value;
-            }
+            foreach (var (key, value) in grouped)
+                _records[key] = value;
 
             var totalCount = _records.Values.Sum(list => list.Count);
-            logger.LogInformation("Loaded {Count} records from persistence storage (deduplicated)", totalCount);
+            logger.LogInformation("已从持久化存储加载 {Count} 条记录（已去重）", totalCount);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to load records from persistence storage");
+            logger.LogError(ex, "从持久化存储加载记录失败");
         }
     }
 
-    /// <summary>
-    /// Save to persistence storage
-    /// </summary>
+    /// <summary>保存到持久化存储</summary>
     private async Task SaveToPersistenceAsync()
     {
         if (repository is null)
-        {
             return;
-        }
 
         await _persistLock.WaitAsync();
         try
         {
             var allRecords = GetAllRecords().ToList();
             await repository.SaveAllAsync(allRecords);
-            logger.LogDebug("Saved {Count} records to persistence storage", allRecords.Count);
+            logger.LogDebug("已保存 {Count} 条记录到持久化存储", allRecords.Count);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to save records to persistence storage");
+            logger.LogError(ex, "保存记录到持久化存储失败");
         }
         finally
         {
@@ -81,57 +75,54 @@ public sealed class CustomRecordStore(
     }
 
     /// <summary>
-    /// Add custom record
+    /// 尝试插入一条记录，返回是否实际新增。
+    /// AddOrUpdate 的委托在竞争下可能被多次调用，因此用返回值判断而非捕获变量。
     /// </summary>
+    private bool TryInsert(DnsRecord record)
+    {
+        var key = GetKey(record.Domain, record.Type);
+
+        while (true)
+        {
+            if (_records.TryGetValue(key, out var existing))
+            {
+                if (existing.Contains(record))
+                    return false;
+
+                if (_records.TryUpdate(key, existing.Add(record), existing))
+                    return true;
+            }
+            else if (_records.TryAdd(key, [record]))
+            {
+                return true;
+            }
+            // CAS 失败说明有并发写入，重试
+        }
+    }
+
+    /// <summary>添加自定义记录</summary>
     public async Task AddRecordAsync(DnsRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
 
-        var key = GetKey(record.Domain, record.Type);
-        var added = false;
-
-        _records.AddOrUpdate(
-            key,
-            _ =>
-            {
-                added = true;
-                return [record];
-            },
-            (_, list) =>
-            {
-                // Check if record already exists (same domain, type, value, and TTL)
-                if (!list.Any(r => r.Domain.Equals(record.Domain, StringComparison.OrdinalIgnoreCase)
-                    && r.Type == record.Type
-                    && r.Value.Equals(record.Value, StringComparison.OrdinalIgnoreCase)
-                    && r.TTL == record.TTL))
-                {
-                    list.Add(record);
-                    added = true;
-                }
-                return list;
-            });
-
-        if (added)
+        if (TryInsert(record))
         {
-            logger.LogInformation("Added custom record: {Record}", record);
+            logger.LogInformation("已添加自定义记录: {Record}", record);
             await SaveToPersistenceAsync();
         }
         else
         {
-            logger.LogDebug("Record already exists, skipped: {Record}", record);
+            logger.LogDebug("记录已存在，跳过: {Record}", record);
         }
     }
 
-    /// <summary>
-    /// Add custom record (synchronous version for backward compatibility)
-    /// </summary>
+    /// <summary>添加自定义记录（同步版本，保持向后兼容）</summary>
     public void AddRecord(DnsRecord record)
-    {
-        AddRecordAsync(record).GetAwaiter().GetResult();
-    }
+        => AddRecordAsync(record).GetAwaiter().GetResult();
 
     /// <summary>
-    /// Add multiple records
+    /// 批量添加记录。全部插入完成后只落盘一次：
+    /// 原实现每条都写全表，批量导入是 O(n²)。
     /// </summary>
     public async Task AddRecordsAsync(IEnumerable<DnsRecord> records)
     {
@@ -143,82 +134,54 @@ public sealed class CustomRecordStore(
         {
             ArgumentNullException.ThrowIfNull(record);
 
-            var key = GetKey(record.Domain, record.Type);
-            var added = false;
-
-            _records.AddOrUpdate(
-                key,
-                _ =>
-                {
-                    added = true;
-                    return [record];
-                },
-                (_, list) =>
-                {
-                    // Check if record already exists (same domain, type, value, and TTL)
-                    if (!list.Any(r => r.Domain.Equals(record.Domain, StringComparison.OrdinalIgnoreCase)
-                        && r.Type == record.Type
-                        && r.Value.Equals(record.Value, StringComparison.OrdinalIgnoreCase)
-                        && r.TTL == record.TTL))
-                    {
-                        list.Add(record);
-                        added = true;
-                    }
-                    return list;
-                });
-
-            if (added)
+            if (TryInsert(record))
             {
-                logger.LogInformation("Added custom record: {Record}", record);
+                logger.LogDebug("已添加自定义记录: {Record}", record);
                 addedCount++;
-            }
-            else
-            {
-                logger.LogDebug("Record already exists, skipped: {Record}", record);
             }
         }
 
         if (addedCount > 0)
         {
+            logger.LogInformation("已批量添加 {Count} 条自定义记录", addedCount);
             await SaveToPersistenceAsync();
         }
     }
 
-    /// <summary>
-    /// Add multiple records (synchronous version for backward compatibility)
-    /// </summary>
+    /// <summary>批量添加记录（同步版本，保持向后兼容）</summary>
     public void AddRecords(IEnumerable<DnsRecord> records)
-    {
-        AddRecordsAsync(records).GetAwaiter().GetResult();
-    }
+        => AddRecordsAsync(records).GetAwaiter().GetResult();
 
     /// <summary>
-    /// Query custom records (supports wildcard)
+    /// 查询自定义记录（支持泛域名）。
+    /// 泛域名命中时把 owner name 改写为实际查询名：
+    /// 直接返回 "*.example.com" 会让客户端因 owner 与 question 不匹配而丢弃应答。
     /// </summary>
     public List<DnsRecord>? Query(string domain, DnsRecordType type)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
-        // 1. Exact match
-        var key = GetKey(domain, type);
-        if (_records.TryGetValue(key, out var records))
+        var queryName = domain.TrimEnd('.');
+
+        // 1. 精确匹配
+        if (_records.TryGetValue(GetKey(queryName, type), out var exact))
         {
-            logger.LogDebug("Found custom record (exact match): {Domain} {Type}", domain, type);
-            return [..records];
+            logger.LogDebug("命中自定义记录（精确匹配）: {Domain} {Type}", queryName, type);
+            return [.. exact];
         }
 
-        // 2. Wildcard match (*.example.com)
-        var wildcardRecords = FindWildcardMatch(domain, type);
-        if (wildcardRecords is not null)
+        // 2. 泛域名匹配
+        var wildcard = FindWildcardMatch(queryName, type);
+        if (wildcard is not null)
         {
-            logger.LogDebug("Found custom record (wildcard match): {Domain} {Type}", domain, type);
-            return wildcardRecords;
+            logger.LogDebug("命中自定义记录（泛域名匹配）: {Domain} {Type}", queryName, type);
+            return wildcard;
         }
 
-        // 3. If querying ANY type, return all records for the domain (including wildcards)
+        // 3. ANY 查询：返回该域名下所有类型的记录
         if (type == DnsRecordType.ANY)
         {
-            var prefix = $"{domain.ToLowerInvariant()}:";
+            var prefix = $"{queryName.ToLowerInvariant()}:";
             var allRecords = _records
                 .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
                 .SelectMany(kvp => kvp.Value)
@@ -226,100 +189,139 @@ public sealed class CustomRecordStore(
 
             if (allRecords.Count > 0)
             {
-                logger.LogDebug("Found custom record (ANY): {Domain}", domain);
+                logger.LogDebug("命中自定义记录（ANY）: {Domain}", queryName);
                 return allRecords;
             }
         }
 
-        logger.LogDebug("Custom record not found: {Domain} {Type}", domain, type);
+        logger.LogDebug("未找到自定义记录: {Domain} {Type}", queryName, type);
         return null;
     }
 
     /// <summary>
-    /// Find wildcard matching records
-    /// Match wildcards from most specific to least specific
-    /// Example: api.dev.example.com will match in order:
-    /// 1. *.dev.example.com
-    /// 2. *.example.com
-    /// 3. *.com
+    /// 判断该域名是否存在任意类型的本地记录（精确或泛域名匹配）。
+    ///
+    /// 用于区分 NXDOMAIN 与 NODATA：域名在本地存在、但没有被查询的那个类型时，
+    /// 应就地返回 NODATA，而不是转发上游——否则像 test.cc 这种仅存在于本地的
+    /// 域名，其 AAAA 查询会一直打到上游并等满超时（nslookup 每次都查 A+AAAA，
+    /// 表现为固定 2 秒卡顿）。
+    /// </summary>
+    public bool ContainsDomain(string domain)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+
+        var queryName = domain.TrimEnd('.');
+
+        // 1. 精确匹配：逐个已知类型做 O(1) 字典查找
+        if (HasAnyType(queryName))
+            return true;
+
+        // 2. 泛域名匹配：与 FindWildcardMatch 保持同样的逐级放宽规则
+        var parts = queryName.Split('.');
+        if (parts.Length < 2)
+            return false;
+
+        for (var i = 0; i < parts.Length - 1; i++)
+        {
+            if (HasAnyType("*." + string.Join('.', parts.Skip(i + 1))))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 该域名下是否存在任意类型的记录。
+    ///
+    /// 走 O(1) 字典查找而非遍历 _records.Keys：后者是 O(记录数 × 域名层级)，
+    /// 实测 1 万条记录时单次调用达 1.1ms（约为 Query 的 1100 倍），
+    /// 而这是每个未命中查询的必经路径，会直接拖垮吞吐。
+    /// </summary>
+    private bool HasAnyType(string domain)
+    {
+        foreach (var type in StorableRecordTypes)
+        {
+            if (_records.ContainsKey(GetKey(domain, type)))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 可能作为存储键出现的记录类型。
+    ///
+    /// 只排除 OPT：它是 EDNS0 伪记录，仅存在于报文中，不会被当作记录存储。
+    /// ANY 虽被 API 层拒绝写入，但配置文件的 CustomRecords 与历史持久化文件
+    /// 不经过该校验，因此仍纳入查找，避免漏判导致本该 NODATA 的查询被转发上游。
+    /// </summary>
+    private static readonly DnsRecordType[] StorableRecordTypes =
+        [.. Enum.GetValues<DnsRecordType>().Where(t => t is not DnsRecordType.OPT)];
+
+    /// <summary>
+    /// 查找泛域名匹配，从最具体到最宽泛。
+    /// 例：api.dev.example.com 依次匹配 *.dev.example.com、*.example.com、*.com
     /// </summary>
     private List<DnsRecord>? FindWildcardMatch(string domain, DnsRecordType type)
     {
         var parts = domain.Split('.');
 
-        // Domain must have at least two parts to match wildcard (e.g. example.com)
         if (parts.Length < 2)
-        {
             return null;
-        }
 
-        // From most specific to least specific wildcard
         for (var i = 0; i < parts.Length - 1; i++)
         {
             var wildcardDomain = "*." + string.Join('.', parts.Skip(i + 1));
-            var key = GetKey(wildcardDomain, type);
 
-            if (_records.TryGetValue(key, out var records))
+            if (_records.TryGetValue(GetKey(wildcardDomain, type), out var records))
             {
-                logger.LogDebug("Wildcard match: {Domain} -> {WildcardDomain}", domain, wildcardDomain);
-                return [..records];
+                logger.LogDebug("泛域名匹配: {Domain} -> {WildcardDomain}", domain, wildcardDomain);
+
+                // owner name 必须改写为客户端查询的名字
+                return [.. records.Select(r => r with { Domain = domain })];
             }
         }
 
         return null;
     }
 
-    /// <summary>
-    /// Remove record
-    /// </summary>
+    /// <summary>删除记录</summary>
     public async Task<bool> RemoveRecordAsync(string domain, DnsRecordType type)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
-        var key = GetKey(domain, type);
-        var removed = _records.TryRemove(key, out _);
+        var removed = _records.TryRemove(GetKey(domain.TrimEnd('.'), type), out _);
 
         if (removed)
         {
-            logger.LogInformation("Removed custom record: {Domain} {Type}", domain, type);
+            logger.LogInformation("已删除自定义记录: {Domain} {Type}", domain, type);
             await SaveToPersistenceAsync();
         }
 
         return removed;
     }
 
-    /// <summary>
-    /// Remove record (synchronous version for backward compatibility)
-    /// </summary>
+    /// <summary>删除记录（同步版本，保持向后兼容）</summary>
     public bool RemoveRecord(string domain, DnsRecordType type)
-    {
-        return RemoveRecordAsync(domain, type).GetAwaiter().GetResult();
-    }
+        => RemoveRecordAsync(domain, type).GetAwaiter().GetResult();
 
-    /// <summary>
-    /// Clear all records
-    /// </summary>
+    /// <summary>清空所有记录</summary>
     public async Task ClearAsync()
     {
         _records.Clear();
-        logger.LogInformation("Cleared all custom records");
+        logger.LogInformation("已清空所有自定义记录");
         await SaveToPersistenceAsync();
     }
 
-    /// <summary>
-    /// Clear all records (synchronous version for backward compatibility)
-    /// </summary>
-    public void Clear()
-    {
-        ClearAsync().GetAwaiter().GetResult();
-    }
+    /// <summary>清空所有记录（同步版本，保持向后兼容）</summary>
+    public void Clear() => ClearAsync().GetAwaiter().GetResult();
 
-    /// <summary>
-    /// Get all records
-    /// </summary>
-    public IEnumerable<DnsRecord> GetAllRecords() =>
-        _records.Values.SelectMany(records => records);
+    /// <summary>获取所有记录</summary>
+    public IEnumerable<DnsRecord> GetAllRecords()
+        => _records.Values.SelectMany(records => records);
 
-    private static string GetKey(string domain, DnsRecordType type) =>
-        $"{domain.ToLowerInvariant()}:{type}";
+    /// <summary>记录总数</summary>
+    public int Count => _records.Values.Sum(list => list.Count);
+
+    private static string GetKey(string domain, DnsRecordType type)
+        => $"{domain.ToLowerInvariant()}:{type}";
 }
