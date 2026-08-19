@@ -17,6 +17,7 @@ public class DnsServerTcpTests
     private readonly CustomRecordStore _recordStore;
     private readonly UpstreamDnsResolver _upstreamResolver;
     private readonly DnsServerOptions _options;
+    private readonly DnsQueryStatistics _statistics;
 
     public DnsServerTcpTests()
     {
@@ -27,6 +28,7 @@ public class DnsServerTcpTests
 
         _recordStore = new CustomRecordStore(recordStoreLogger.Object);
         var dnsCache = new DnsCache(cacheLogger.Object);
+        _statistics = new DnsQueryStatistics();
 
         // 使用高端口避免权限问题
         _options = new DnsServerOptions
@@ -103,7 +105,8 @@ public class DnsServerTcpTests
     public async Task DnsServer_ShouldAcceptTcpConnections()
     {
         // Arrange
-        var server = new DnsServer(_mockLogger.Object, _recordStore, _upstreamResolver, _options);
+        var latencyStats = new DnsLatencyStatistics();
+        var server = new DnsServer(_mockLogger.Object, _recordStore, _upstreamResolver, _options, _statistics, latencyStats);
 
         // 添加测试记录
         _recordStore.AddRecord(new DnsRecord
@@ -150,7 +153,8 @@ public class DnsServerTcpTests
     public async Task DnsServer_ShouldRespondToTcpDnsQuery()
     {
         // Arrange
-        var server = new DnsServer(_mockLogger.Object, _recordStore, _upstreamResolver, _options);
+        var latencyStats = new DnsLatencyStatistics();
+        var server = new DnsServer(_mockLogger.Object, _recordStore, _upstreamResolver, _options, _statistics, latencyStats);
 
         // 添加测试记录
         _recordStore.AddRecord(new DnsRecord

@@ -78,6 +78,11 @@
             </div>
 
             <div class="topbar__actions">
+                <!-- 服务状态：常驻顶栏，切换标签页或滚动时都能看到 -->
+                <span class="status-pill is-loading" id="serverStatusPill">
+                    <span class="status-pill__dot" aria-hidden="true"></span>
+                    <span id="serverStatus" role="status">检查中</span>
+                </span>
                 <span id="apiKeyBadge" class="key-badge" hidden>
                     <svg aria-hidden="true"><use href="#i-key"/></svg>
                     <span>已配置密钥</span>
@@ -99,25 +104,27 @@
         </header>
 
         <main id="main">
-            <!-- 统计卡片 -->
-            <section class="stats" aria-label="服务状态概览">
+            <!-- 核心统计卡片 -->
+            <section class="stats" aria-label="运行指标概览">
                 <article class="stat">
-                    <span class="stat__icon stat__icon--status" aria-hidden="true">
+                    <span class="stat__icon stat__icon--qps" aria-hidden="true">
                         <svg><use href="#i-activity"/></svg>
                     </span>
                     <div class="stat__body">
-                        <span class="stat__label">服务状态</span>
-                        <span id="serverStatus" class="stat__value is-loading" role="status">检查中</span>
+                        <span class="stat__label">当前 QPS</span>
+                        <span id="qpsSecond" class="stat__value">—</span>
+                        <div class="stat__mini-trend" id="qpsTrend" aria-hidden="true"></div>
                     </div>
                 </article>
 
                 <article class="stat">
-                    <span class="stat__icon stat__icon--records" aria-hidden="true">
-                        <svg><use href="#i-database"/></svg>
+                    <span class="stat__icon stat__icon--latency" aria-hidden="true">
+                        <svg><use href="#i-activity"/></svg>
                     </span>
                     <div class="stat__body">
-                        <span class="stat__label">自定义记录</span>
-                        <span id="recordCount" class="stat__value">0</span>
+                        <span class="stat__label">平均延迟</span>
+                        <span id="latencyAvgTop" class="stat__value">—</span>
+                        <span class="stat__unit">ms</span>
                     </div>
                 </article>
 
@@ -138,9 +145,104 @@
                     <div class="stat__body">
                         <span class="stat__label">缓存命中率</span>
                         <span id="cacheHitRate" class="stat__value">—</span>
+                        <span id="cacheHitRateUnit" class="stat__unit"></span>
                     </div>
                 </article>
             </section>
+
+            <!-- 详细监控面板（可折叠） -->
+            <details class="monitor-panel" id="monitorPanel" open>
+                <summary class="monitor-panel__header">
+                    <svg class="monitor-panel__icon" aria-hidden="true"><use href="#i-activity"/></svg>
+                    <h2 class="monitor-panel__title">详细监控数据</h2>
+                    <span class="monitor-panel__toggle" aria-hidden="true">
+                        <svg class="icon-collapsed"><use href="#i-plus"/></svg>
+                        <svg class="icon-expanded"><use href="#i-x"/></svg>
+                    </span>
+                </summary>
+
+                <div class="monitor-panel__content">
+                    <!-- 请求量统计 -->
+                    <section class="metric-group">
+                        <h3 class="metric-group__title">
+                            <svg aria-hidden="true"><use href="#i-activity"/></svg>
+                            DNS 请求量
+                        </h3>
+                        <div class="metric-grid">
+                            <div class="metric">
+                                <span class="metric__label">最近一秒</span>
+                                <span id="qpsSecondDetail" class="metric__value">—</span>
+                                <span class="metric__unit">req/s</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">最近一分钟</span>
+                                <span id="qpsMinute" class="metric__value">—</span>
+                                <span class="metric__unit">req</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">最近一小时</span>
+                                <span id="qpsHour" class="metric__value">—</span>
+                                <span class="metric__unit">req</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">最近一天</span>
+                                <span id="qpsDay" class="metric__value">—</span>
+                                <span class="metric__unit">req</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">总请求数</span>
+                                <span id="qpsTotal" class="metric__value">—</span>
+                                <span class="metric__unit">次</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">运行时长</span>
+                                <span id="uptime" class="metric__value">—</span>
+                                <span id="uptimeUnit" class="metric__unit"></span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- 延迟统计 -->
+                    <section class="metric-group">
+                        <h3 class="metric-group__title">
+                            <svg aria-hidden="true"><use href="#i-activity"/></svg>
+                            响应延迟
+                        </h3>
+                        <div class="metric-grid">
+                            <div class="metric">
+                                <span class="metric__label">平均</span>
+                                <span id="latencyAvg" class="metric__value">—</span>
+                                <span class="metric__unit">ms</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">最小</span>
+                                <span id="latencyMin" class="metric__value">—</span>
+                                <span class="metric__unit">ms</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">最大</span>
+                                <span id="latencyMax" class="metric__value">—</span>
+                                <span class="metric__unit">ms</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">P50</span>
+                                <span id="latencyP50" class="metric__value">—</span>
+                                <span class="metric__unit">ms</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">P95</span>
+                                <span id="latencyP95" class="metric__value">—</span>
+                                <span class="metric__unit">ms</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric__label">P99</span>
+                                <span id="latencyP99" class="metric__value">—</span>
+                                <span class="metric__unit">ms</span>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </details>
 
             <!-- 标签导航 -->
             <div class="tabs" role="tablist" aria-label="管理功能">
@@ -229,10 +331,6 @@
                             <svg aria-hidden="true"><use href="#i-plus"/></svg>
                             <span>添加记录</span>
                         </button>
-                        <button type="button" id="clearAllBtn" class="btn btn--danger-soft">
-                            <svg aria-hidden="true"><use href="#i-trash"/></svg>
-                            <span>清空所有记录</span>
-                        </button>
                     </div>
                 </form>
             </section>
@@ -245,6 +343,9 @@
                         DNS 记录列表
                     </h2>
                     <span id="filterCount" class="panel__meta" role="status"></span>
+                    <span class="count-badge">
+                        <span id="recordCount">0</span> 条
+                    </span>
                 </div>
 
                 <div class="search">
@@ -274,6 +375,15 @@
                             </tr>
                         </tbody>
                     </table>
+                </div>
+
+                <!-- 危险操作区：清空是不可恢复且极少使用的操作，
+                     放在列表末尾而非表单主操作区，避免与"添加记录"并列被误点 -->
+                <div class="panel__footer">
+                    <button type="button" id="clearAllBtn" class="btn btn--sm btn--danger-ghost">
+                        <svg aria-hidden="true"><use href="#i-trash"/></svg>
+                        <span>清空所有记录</span>
+                    </button>
                 </div>
             </section>
 

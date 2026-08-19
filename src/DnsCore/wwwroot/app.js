@@ -2,6 +2,7 @@
 
 const API_BASE = '/api/dns';
 const CACHE_API = '/api/cache';
+const QPS_API = '/api/qps';
 const API_KEY_STORAGE = 'dnscore.apiKey';
 const THEME_STORAGE = 'dnscore.theme';
 
@@ -10,9 +11,28 @@ let allRecords = [];
 // DOM 元素
 const $ = {
     serverStatus: document.getElementById('serverStatus'),
+    serverStatusPill: document.getElementById('serverStatusPill'),
     recordCount: document.getElementById('recordCount'),
     cacheEntries: document.getElementById('cacheEntries'),
     cacheHitRate: document.getElementById('cacheHitRate'),
+    cacheHitRateUnit: document.getElementById('cacheHitRateUnit'),
+    qpsSecond: document.getElementById('qpsSecond'),
+    qpsSecondDetail: document.getElementById('qpsSecondDetail'),
+    qpsMinute: document.getElementById('qpsMinute'),
+    qpsHour: document.getElementById('qpsHour'),
+    qpsDay: document.getElementById('qpsDay'),
+    qpsTotal: document.getElementById('qpsTotal'),
+    uptime: document.getElementById('uptime'),
+    uptimeUnit: document.getElementById('uptimeUnit'),
+    latencyAvgTop: document.getElementById('latencyAvgTop'),
+    latencyAvg: document.getElementById('latencyAvg'),
+    latencyMin: document.getElementById('latencyMin'),
+    latencyMax: document.getElementById('latencyMax'),
+    latencyP50: document.getElementById('latencyP50'),
+    latencyP95: document.getElementById('latencyP95'),
+    latencyP99: document.getElementById('latencyP99'),
+    qpsTrend: document.getElementById('qpsTrend'),
+    monitorPanel: document.getElementById('monitorPanel'),
     apiKeyBadge: document.getElementById('apiKeyBadge'),
     apiKeyBtn: document.getElementById('apiKeyBtn'),
     themeBtn: document.getElementById('themeBtn'),
@@ -55,6 +75,7 @@ const $ = {
 };
 
 const TAB_STORAGE = 'dnscore.activeTab';
+const DETAILS_STORAGE = 'dnscore.monitorOpen';
 
 // 上游配置的本地编辑状态；savedUpstream 用于"放弃修改"与脏检查
 let upstreamServers = [];
@@ -66,11 +87,14 @@ document.addEventListener('DOMContentLoaded', init);
 function init() {
     restoreTheme();
     restoreTab();
+    restoreStatsDetails();
     updateKeyBadge();
     bindEvents();
     checkServerHealth();
     loadRecords();
     loadCacheStats();
+    loadQueryStats();
+    loadLatencyStats();
     loadUpstreamSettings();
     startAutoRefresh();
 }
@@ -183,6 +207,53 @@ function updateTabIndicators() {
     $.tabUpstreamDot.hidden = $.upstreamWarn.hidden;
 }
 
+// --- 监控面板折叠状态 -----------------------------------------------------
+// 折叠状态持久化：详细指标对多数场景是次要信息，用户收起后不应每次刷新又展开
+function restoreStatsDetails() {
+    if (!$.monitorPanel) return;
+
+    const saved = localStorage.getItem(DETAILS_STORAGE);
+    // 仅在明确存过 'closed' 时收起，默认展开
+    $.monitorPanel.open = saved !== 'closed';
+
+    $.monitorPanel.addEventListener('toggle', () => {
+        localStorage.setItem(DETAILS_STORAGE, $.monitorPanel.open ? 'open' : 'closed');
+    });
+}
+
+// --- QPS 迷你趋势图 -------------------------------------------------------
+const QPS_TREND_POINTS = 12;
+
+/// 用后端 recentSeconds 的尾部切片作为趋势源。
+/// 不用前端自己按刷新周期累积：自动刷新是 30 秒一次，那样得到的
+/// 相邻两点之间隔了 30 秒，画出来的"趋势"与真实每秒曲线无关。
+function updateQpsTrend(perSecondSeries) {
+    if (!Array.isArray(perSecondSeries) || perSecondSeries.length === 0) return;
+
+    renderSparkline(perSecondSeries.slice(-QPS_TREND_POINTS));
+}
+
+/// 用纯 DOM 柱状条渲染 sparkline，不引入图表库也不用 canvas：
+/// 数据点只有十几个，柱条方案能直接继承主题色与 prefers-reduced-motion。
+function renderSparkline(values) {
+    if (!$.qpsTrend) return;
+
+    // 先规整为有限非负数：数组里出现 null/undefined/NaN 时，Math.max 会返回 NaN，
+    // 进而让每根柱子的 height 都变成 "NaN%"，浏览器丢弃该声明、整张图塌成空白。
+    const nums = values.map(v => {
+        const n = Number(v);
+        return Number.isFinite(n) && n > 0 ? n : 0;
+    });
+
+    const max = Math.max(...nums, 1);
+
+    $.qpsTrend.innerHTML = nums.map(v => {
+        // 有请求时至少给 8% 高度，否则 1 QPS 的柱子会看不见
+        const pct = v === 0 ? 0 : Math.max(8, (v / max) * 100);
+        return `<span class="spark__bar" style="height:${pct}%"></span>`;
+    }).join('');
+}
+
 // --- 主题 -----------------------------------------------------------------
 function restoreTheme() {
     const saved = localStorage.getItem(THEME_STORAGE);
@@ -276,6 +347,7 @@ function refreshAll() {
     checkServerHealth();
     loadRecords(true);
     loadCacheStats();
+    loadQueryStats();
     loadUpstreamSettings();
 }
 
@@ -303,22 +375,136 @@ function updateFormHints() {
 }
 
 // --- 健康检查 & 缓存统计 --------------------------------------------------
+/// 更新顶栏状态指示灯。状态类挂在 pill 上（而非文字节点），
+/// 这样圆点与底色能一起变色，且不会覆盖 pill 自身的布局类。
+function setServerStatus(text, state) {
+    $.serverStatus.textContent = text;
+
+    const pill = $.serverStatusPill;
+    if (!pill) return;
+
+    pill.classList.remove('is-loading', 'is-healthy', 'is-error');
+    if (state) pill.classList.add(`is-${state}`);
+}
+
+/// 写入卡片第三行的单位文本。
+/// 无数据时传空串而不是隐藏元素：第三行高度由 grid 固定，
+/// 清空文本即可，既不会让卡片塌陷，也避免显示成"— %"。
+function setUnit(el, text) {
+    if (el) el.textContent = text;
+}
+
 async function checkServerHealth() {
     try {
         const response = await fetch('/health');
         const data = await response.json();
 
         if (response.ok && data.status === 'Healthy') {
-            $.serverStatus.textContent = '正常运行';
-            $.serverStatus.className = 'stat__value is-healthy';
+            setServerStatus('正常运行', 'healthy');
         } else {
             throw new Error('Server unhealthy');
         }
     } catch (error) {
-        $.serverStatus.textContent = '离线';
-        $.serverStatus.className = 'stat__value is-error';
+        setServerStatus('离线', 'error');
         showToast('无法连接到服务器', 'error');
     }
+}
+
+// --- DNS 请求量统计 -------------------------------------------------------
+async function loadQueryStats() {
+    try {
+        const response = await apiFetch(QPS_API);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const stats = await response.json();
+
+        // 各时间窗口的聚合值现在由后端直接给出。
+        // 之前前端把 last24Hours 数组求和当"最近一天"，而那个数组按小时分桶、
+        // 且当前小时的数据要等跨小时才写入，于是这项长期显示 0。
+        const n = v => (v ?? 0).toLocaleString();
+
+        $.qpsSecond.textContent = n(stats.perSecond);
+        if ($.qpsSecondDetail) $.qpsSecondDetail.textContent = n(stats.perSecond);
+        $.qpsMinute.textContent = n(stats.perMinute);
+        $.qpsHour.textContent = n(stats.perHour);
+        $.qpsDay.textContent = n(stats.perDay);
+        $.qpsTotal.textContent = n(stats.totalQueries);
+
+        updateQpsTrend(stats.recentSeconds);
+
+        // 运行时长
+        if ($.uptime && stats.uptimeSeconds !== undefined) {
+            const up = formatUptime(stats.uptimeSeconds);
+            $.uptime.textContent = up.value;
+            setUnit($.uptimeUnit, up.unit);
+        }
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            console.warn('加载查询统计失败:', error);
+        }
+        ['qpsSecond', 'qpsSecondDetail', 'qpsMinute', 'qpsHour', 'qpsDay', 'qpsTotal', 'uptime']
+            .forEach(id => { if ($[id]) $[id].textContent = '—'; });
+        setUnit($.uptimeUnit, '');
+    }
+}
+
+async function loadLatencyStats() {
+    try {
+        const response = await apiFetch(`${QPS_API}/latency`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const stats = await response.json();
+
+        // 格式化延迟为毫秒，保留2位小数
+        const formatMs = (ms) => ms !== null && ms !== undefined ? ms.toFixed(2) : '—';
+
+        const avgMs = formatMs(stats.averageMs);
+
+        // 更新顶部卡片和详细面板
+        if ($.latencyAvgTop) $.latencyAvgTop.textContent = avgMs;
+        $.latencyAvg.textContent = avgMs;
+        $.latencyMin.textContent = formatMs(stats.minMs);
+        $.latencyMax.textContent = formatMs(stats.maxMs);
+        $.latencyP50.textContent = formatMs(stats.p50Ms);
+        $.latencyP95.textContent = formatMs(stats.p95Ms);
+        $.latencyP99.textContent = formatMs(stats.p99Ms);
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            console.warn('加载延迟统计失败:', error);
+        }
+        ['latencyAvg', 'latencyMin', 'latencyMax', 'latencyP50', 'latencyP95', 'latencyP99']
+            .forEach(id => { if ($[id]) $[id].textContent = '—'; });
+    }
+}
+
+/// 把秒数拆成 { value, unit } 两部分，只取最大的一个单位。
+/// 不再返回「3小时 25分」这种复合串：数值行与单位行分离后，
+/// 复合单位无法归到第三行，会让这张卡片与同组其他卡片结构不一致。
+/// 小数保留一位，避免"3小时"丢掉将近一小时的信息。
+function formatUptime(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) {
+        return { value: '—', unit: '' };
+    }
+
+    const units = [
+        { limit: 86400, label: '天' },
+        { limit: 3600,  label: '小时' },
+        { limit: 60,    label: '分' }
+    ];
+
+    for (const { limit, label } of units) {
+        if (seconds >= limit) {
+            const n = seconds / limit;
+            // 判断的必须是保留一位后的结果，而不是原始值：
+            // 90000 秒 = 1.0416 天，原始值非整数但 toFixed(1) 得到 "1.0"，
+            // 若按原始值判断就会显示成"1.0 天"而不是"1 天"
+            const rounded = Math.round(n * 10) / 10;
+            const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+            return { value: text, unit: label };
+        }
+    }
+
+    return { value: String(Math.floor(seconds)), unit: '秒' };
 }
 
 async function loadCacheStats() {
@@ -329,14 +515,17 @@ async function loadCacheStats() {
         const stats = await response.json();
 
         $.cacheEntries.textContent = stats.activeEntries?.toLocaleString() ?? '—';
-        const hitRate = stats.hitRate != null && stats.hitRate >= 0
-            ? `${(stats.hitRate * 100).toFixed(1)}%`
-            : '—';
-        $.cacheHitRate.textContent = hitRate;
+
+        // 单位归到第三行，与其它卡片结构一致；
+        // 无数据时连同单位一起隐藏，否则会显示成"— %"
+        const hasRate = stats.hitRate != null && stats.hitRate >= 0;
+        $.cacheHitRate.textContent = hasRate ? (stats.hitRate * 100).toFixed(1) : '—';
+        setUnit($.cacheHitRateUnit, hasRate ? '%' : '');
     } catch (error) {
         console.warn('加载缓存统计失败:', error);
         $.cacheEntries.textContent = '—';
         $.cacheHitRate.textContent = '—';
+        setUnit($.cacheHitRateUnit, '');
     }
 }
 
@@ -396,7 +585,7 @@ function onRaceModeChange() {
     const isRace = $.raceMode.value === 'true';
     $.raceHint.textContent = isRace
         ? '并行模式下列表顺序不影响结果，但每次查询都会打所有上游'
-        : '顺序模式下列表次序即优先级，可拖拽标签调整（或 Alt + 方向键）';
+        : '顺序模式下列表次序即优先级，可拖拽标签调整';
     // 顺序模式才显示优先级序号
     renderServerChips();
 }
@@ -981,6 +1170,8 @@ async function handleRefresh() {
         checkServerHealth(),
         loadRecords(true),
         loadCacheStats(),
+        loadQueryStats(),
+        loadLatencyStats(),
         // 只在没有未保存改动时重载上游配置，否则会覆盖用户正在编辑的内容
         $.upstreamWarn.hidden ? loadUpstreamSettings() : Promise.resolve()
     ]).finally(() => {
@@ -995,6 +1186,8 @@ function startAutoRefresh() {
     setInterval(() => {
         loadRecords(true);
         loadCacheStats();
+        loadQueryStats();
+        loadLatencyStats();
     }, 30000);
 }
 

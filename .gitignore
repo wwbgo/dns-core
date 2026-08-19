@@ -89,4 +89,7 @@ data/*
 !data/.gitkeep
 *.db
 *.litedb
+# 不带斜杠，因此匹配任意层级：以 dotnet run 启动时数据会落在
+# src/DnsCore/data/ 下，而上面的 data/* 只作用于仓库根目录
 dns-records.json
+upstream-settings.json

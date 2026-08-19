@@ -2,6 +2,7 @@ using DnsCore.Configuration;
 using DnsCore.Models;
 using DnsCore.Protocol;
 using System.Buffers;
+using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -15,7 +16,9 @@ public sealed class DnsServer(
     ILogger<DnsServer> logger,
     CustomRecordStore customRecordStore,
     UpstreamDnsResolver upstreamResolver,
-    DnsServerOptions options)
+    DnsServerOptions options,
+    DnsQueryStatistics statistics,
+    DnsLatencyStatistics latencyStatistics)
 {
     private UdpClient? _udpServer;
     private TcpListener? _tcpServer;
@@ -441,32 +444,42 @@ public sealed class DnsServer(
             return null;
         }
 
-        var header = query.Header;
+        // 报文解析成功即计入：FormErr / NotImp 这类请求服务同样处理并应答了，
+        // 属于真实到达的查询流量。只有解析失败的垃圾包不计（上面已 return）。
+        statistics.RecordQuery();
 
-        if (query.Questions.Count == 0)
-        {
-            logger.LogDebug("DNS 请求无 question 区({Protocol})", protocol);
-            return BuildErrorResponse(query, DnsResponseCode.FormErr, maxResponseSize);
-        }
-
-        // 只支持标准查询（Opcode 0）
-        if (header.Opcode != 0)
-        {
-            logger.LogDebug("不支持的 Opcode {Opcode}({Protocol})", header.Opcode, protocol);
-            return BuildErrorResponse(query, DnsResponseCode.NotImp, maxResponseSize);
-        }
-
-        var question = query.Questions[0];
-
-        if (options.LogEveryQuery)
-        {
-            // 域名来自不可信输入，转义后再记录，避免日志注入
-            logger.LogInformation("收到 DNS 查询({Protocol}): {Domain} {Type} 来自 {Client}",
-                protocol, Sanitize(question.Name), question.Type, clientEndpoint);
-        }
+        // 计时起点必须紧跟计数：两者若覆盖的返回路径不同，/api/qps 的 totalQueries
+        // 会与 /api/qps/latency 的 totalRequests 分叉（FormErr/NotImp 曾只计其一）。
+        // 用 Stopwatch 而非 DateTime.UtcNow：后者是墙上时钟，NTP 回拨会算出负延迟，
+        // 污染最小值与平均值。
+        var startedAt = Stopwatch.GetTimestamp();
 
         try
         {
+            var header = query.Header;
+
+            if (query.Questions.Count == 0)
+            {
+                logger.LogDebug("DNS 请求无 question 区({Protocol})", protocol);
+                return BuildErrorResponse(query, DnsResponseCode.FormErr, maxResponseSize);
+            }
+
+            // 只支持标准查询（Opcode 0）
+            if (header.Opcode != 0)
+            {
+                logger.LogDebug("不支持的 Opcode {Opcode}({Protocol})", header.Opcode, protocol);
+                return BuildErrorResponse(query, DnsResponseCode.NotImp, maxResponseSize);
+            }
+
+            var question = query.Questions[0];
+
+            if (options.LogEveryQuery)
+            {
+                // 域名来自不可信输入，转义后再记录，避免日志注入
+                logger.LogInformation("收到 DNS 查询({Protocol}): {Domain} {Type} 来自 {Client}",
+                    protocol, Sanitize(question.Name), question.Type, clientEndpoint);
+            }
+
             // 0. 自动应答服务器自身的 PTR 查询（修复 nslookup 显示 "UnKnown"）
             if (question.Type == DnsRecordType.PTR && !string.IsNullOrWhiteSpace(options.Hostname))
             {
@@ -542,8 +555,14 @@ public sealed class DnsServer(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "处理 DNS 查询出错({Protocol}): {Domain}", protocol, Sanitize(question.Name));
+            // question 现在声明在 try 内，catch 作用域不可见；从 query 安全取用于日志
+            var domain = query.Questions.Count > 0 ? Sanitize(query.Questions[0].Name) : "(无 question)";
+            logger.LogError(ex, "处理 DNS 查询出错({Protocol}): {Domain}", protocol, domain);
             return BuildErrorResponse(query, DnsResponseCode.ServFail, maxResponseSize);
+        }
+        finally
+        {
+            latencyStatistics.RecordLatency(Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
         }
     }
 

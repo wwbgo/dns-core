@@ -69,6 +69,8 @@ builder.Services.AddSingleton<CustomRecordStore>();
 builder.Services.AddSingleton<DnsCache>();
 builder.Services.AddSingleton<UpstreamDnsResolver>();
 builder.Services.AddSingleton<UpstreamSettingsStore>();
+builder.Services.AddSingleton<DnsQueryStatistics>();
+builder.Services.AddSingleton<DnsLatencyStatistics>();
 builder.Services.AddSingleton<DnsServer>();
 builder.Services.AddHostedService<DnsServerHostedService>();
 builder.Services.AddHostedService<DnsCacheCleanupService>();
@@ -215,6 +217,15 @@ cacheApi.MapDelete("/", (DnsCache cache) =>
     return Results.NoContent();
 })
 .WithName("ClearCache");
+
+// ==== QPS 统计 ====
+var qpsApi = app.MapGroup("/api/qps").WithTags("QPS Statistics");
+
+qpsApi.MapGet("/", (DnsQueryStatistics statistics) => Results.Ok(statistics.GetStats()))
+    .WithName("GetQpsStatistics");
+
+qpsApi.MapGet("/latency", (DnsLatencyStatistics latencyStats) => Results.Ok(latencyStats.GetStats()))
+    .WithName("GetLatencyStatistics");
 
 app.Logger.LogInformation("DNS Core Server 正在启动...");
 app.Logger.LogInformation("DNS 监听: {Address}:{Port} (UDP/TCP)", dnsOptions.ListenAddress, dnsOptions.Port);

@@ -3,6 +3,14 @@
    设计令牌 + 深浅双主题 + 无障碍 + 响应式
    ========================================================================== */
 
+/* --- hidden 兜底 ---------------------------------------------------------
+   HTML 的 hidden 属性只提供 display:none 的"作者样式表默认值"，任何显式
+   display 声明（flex/grid/inline-flex）都会覆盖它。本文件多处组件都设了
+   display，若逐个打 [hidden] 补丁，新增组件极易漏掉——曾导致搜索清除按钮、
+   密钥徽标常显，以及两个标签页面板同时渲染。这里一次性兜底。
+   需要"隐藏但保留布局"的场景请用 visibility/opacity，不要用 hidden。 */
+[hidden] { display: none !important; }
+
 /* --- 设计令牌 ------------------------------------------------------------ */
 :root {
     color-scheme: light;
@@ -309,6 +317,67 @@ main {
     flex-wrap: wrap;
 }
 
+/* 顶栏服务状态：点 + 文字的胶囊。
+   颜色由 JS 加在胶囊上的状态类驱动，而不是改文字元素本身，
+   这样圆点和底色能一起变。 */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    /* 与顶栏按钮同高，避免基线错位 */
+    min-height: 38px;
+    padding: 0 var(--sp-3);
+    font-size: .84rem;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--text-muted);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-full);
+    transition: color var(--dur) var(--ease), background var(--dur) var(--ease),
+                border-color var(--dur) var(--ease);
+}
+
+.status-pill__dot {
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.status-pill.is-loading {
+    color: var(--warn-fg);
+    background: var(--warn-bg);
+    border-color: var(--warn-line);
+}
+
+.status-pill.is-healthy {
+    color: var(--ok-fg);
+    background: var(--ok-bg);
+    border-color: var(--ok-line);
+}
+
+.status-pill.is-error {
+    color: var(--err-fg);
+    background: var(--err-bg);
+    border-color: var(--err-line);
+}
+
+/* 正常运行时圆点缓慢呼吸，表示"仍在轮询"而非画面卡住 */
+.status-pill.is-healthy .status-pill__dot {
+    animation: pulse-dot 2.4s var(--ease) infinite;
+}
+
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .status-pill.is-healthy .status-pill__dot { animation: none; }
+}
+
 .key-badge {
     display: inline-flex;
     align-items: center;
@@ -390,21 +459,21 @@ main {
 
 .btn--icon { padding: var(--sp-2); width: 38px; }
 
-/* 危险操作用低饱和底色 + 语义色文字，hover 时才转为实心红：
-   一直保持实心红会过度吸引注意力 */
-.btn--danger-soft {
+/* 破坏性但低频的操作（如清空全部记录）：默认近乎无样式，
+   只在 hover/focus 时显出红色。放在面板页脚，避免与"添加记录"
+   这类正向主操作争夺注意力，同时又不藏到用户找不到的地方。 */
+.btn--danger-ghost {
+    color: var(--text-subtle);
+    background: transparent;
+    border-color: transparent;
+}
+
+.btn--danger-ghost:hover,
+.btn--danger-ghost:focus-visible {
     color: var(--err-fg);
     background: var(--err-bg);
     border-color: var(--err-line);
 }
-
-.btn--danger-soft:hover {
-    color: #fff;
-    background: #c8352c;
-    border-color: transparent;
-}
-
-:root[data-theme='dark'] .btn--danger-soft:hover { color: #1a0f10; background: var(--err-fg); }
 
 .btn--sm { min-height: 30px; padding: var(--sp-1) var(--sp-3); font-size: .82rem; }
 
@@ -440,12 +509,22 @@ main {
     color: var(--text-muted);
 }
 
-.stat__icon--status  { background: var(--ok-bg);    color: var(--ok-fg); }
-.stat__icon--records { background: var(--info-bg);  color: var(--info-fg); }
-.stat__icon--cache   { background: var(--warn-bg);  color: var(--warn-fg); }
+.stat__icon--qps     { background: var(--brand-50); color: var(--brand-600); }
+.stat__icon--latency { background: var(--warn-bg);  color: var(--warn-fg); }
+.stat__icon--cache   { background: var(--info-bg);  color: var(--info-fg); }
 .stat__icon--hit     { background: var(--ok-bg);    color: var(--ok-fg); }
 
-.stat__body { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+/* 三行固定网格：标签 / 数值 / 附加行（单位或趋势图）。
+   用 grid 而非 flex 是为了让第三行即使为空也占位——同一行里
+   「当前 QPS」有趋势图、「平均延迟」有单位、缓存两张都没有，
+   若不固定行高，三种卡片的标签与数值基线会互相错开。 */
+.stat__body {
+    display: grid;
+    grid-template-rows: auto auto 20px;
+    align-content: center;
+    min-width: 0;
+    gap: 1px;
+}
 
 .stat__label {
     font-size: .78rem;
@@ -464,9 +543,208 @@ main {
     line-height: 1.2;
 }
 
-.stat__value.is-loading  { color: var(--warn-fg); font-size: 1.05rem; }
-.stat__value.is-healthy  { color: var(--ok-fg);   font-size: 1.05rem; }
-.stat__value.is-error    { color: var(--err-fg);  font-size: 1.05rem; }
+.stat__unit {
+    font-size: .78rem;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    /* 第三行高度已由 grid 固定，这里靠 align-self 在行内居中，
+       不能再用 margin-top 顶开——那会把行撑高、又造成错位 */
+    align-self: center;
+}
+
+.stat__mini-trend {
+    /* 高度交给 grid 的第三行；此处 height:100% 撑满该行。
+       原先的 margin-top 会叠加在固定行高之外，把卡片顶高 */
+    height: 100%;
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    opacity: .6;
+}
+
+.spark__bar {
+    flex: 1;
+    background: var(--brand-500);
+    border-radius: 1px;
+    min-height: 2px;
+    transition: height 300ms var(--ease);
+}
+
+/* 无数据时柱条高度为 0，留一条基线表示"在采样但无请求" */
+.spark__bar[style*="height:0%"] {
+    min-height: 2px;
+    background: var(--border-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .spark__bar { transition: none; }
+}
+
+/* --- 监控面板（可折叠） --------------------------------------------------- */
+.monitor-panel {
+    margin-block: var(--sp-6);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+
+.monitor-panel__header {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-4) var(--sp-5);
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+    transition: background var(--dur) var(--ease);
+    list-style: none;
+}
+
+.monitor-panel__header::-webkit-details-marker { display: none; }
+.monitor-panel__header::marker { content: ''; }
+
+.monitor-panel__header:hover {
+    background: var(--surface-3);
+}
+
+.monitor-panel__icon {
+    width: 20px;
+    height: 20px;
+    color: var(--brand-500);
+    flex-shrink: 0;
+}
+
+.monitor-panel__title {
+    flex: 1;
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: -.01em;
+    color: var(--text);
+}
+
+.monitor-panel__toggle {
+    display: flex;
+    /* 子 svg 用 absolute 做加号/叉号交叉淡入，必须有定位上下文，
+       否则会相对初始包含块（视口）定位 */
+    position: relative;
+    width: 20px;
+    height: 20px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.monitor-panel__toggle svg {
+    position: absolute;
+    transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+.monitor-panel__toggle .icon-collapsed {
+    opacity: 0;
+    transform: rotate(-90deg);
+}
+
+.monitor-panel__toggle .icon-expanded {
+    opacity: 1;
+    transform: rotate(0deg);
+}
+
+.monitor-panel:not([open]) .monitor-panel__toggle .icon-collapsed {
+    opacity: 1;
+    transform: rotate(0deg);
+}
+
+.monitor-panel:not([open]) .monitor-panel__toggle .icon-expanded {
+    opacity: 0;
+    transform: rotate(90deg);
+}
+
+.monitor-panel__content {
+    padding: var(--sp-5);
+}
+
+/* --- 指标组 -------------------------------------------------------------- */
+.metric-group {
+    margin-bottom: var(--sp-6);
+}
+
+.metric-group:last-child {
+    margin-bottom: 0;
+}
+
+.metric-group__title {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    margin: 0 0 var(--sp-4);
+    font-size: .95rem;
+    font-weight: 700;
+    letter-spacing: -.01em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+.metric-group__title svg {
+    width: 16px;
+    height: 16px;
+    opacity: .7;
+}
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: var(--sp-3);
+}
+
+.metric {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: var(--sp-4);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    transition: all var(--dur) var(--ease);
+}
+
+.metric:hover {
+    background: var(--surface-3);
+    border-color: var(--border-strong);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+
+.metric__label {
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin-bottom: var(--sp-1);
+}
+
+.metric__value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    color: var(--text);
+}
+
+.metric__unit {
+    font-size: .75rem;
+    color: var(--text-subtle);
+    font-weight: 600;
+    margin-top: var(--sp-1);
+}
 
 /* --- 标签页 -------------------------------------------------------------- */
 .tabs {
@@ -571,9 +849,6 @@ main {
     animation: tab-in 180ms var(--ease);
 }
 
-/* hidden 属性优先于 display:flex，需显式覆盖 */
-.tabpanel[hidden] { display: none; }
-
 /* 面板本身不需要焦点框（它只是 Tab 序列中的落点） */
 .tabpanel:focus { outline: none; }
 
@@ -618,6 +893,34 @@ main {
 .panel__meta {
     font-size: .84rem;
     color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    /* 把过滤计数推到标题与记录数徽标之间，徽标保持贴右 */
+    margin-left: auto;
+}
+
+/* 面板底部的次要/危险操作区。与表格之间用分隔线断开，
+   并靠右对齐——破坏性操作不应出现在视线自然落点上。 */
+.panel__footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: var(--sp-4);
+    padding-top: var(--sp-3);
+    border-top: 1px solid var(--border);
+}
+
+/* 记录总数徽标：标题栏最右侧 */
+.count-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px var(--sp-3);
+    font-size: .8rem;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--info-fg);
+    background: var(--info-bg);
+    border: 1px solid var(--info-line);
+    border-radius: var(--r-full);
     font-variant-numeric: tabular-nums;
 }
 
@@ -1321,7 +1624,22 @@ tbody tr:hover .row-del { color: var(--err-fg); border-color: var(--err-line); b
 
     .stat__value { font-size: 1.1rem; }
 
-    .stat__value.is-loading, .stat__value.is-healthy, .stat__value.is-error { font-size: .92rem; }
+    /* 窄屏下趋势图信息密度过低，隐藏后把空间让给数值本身 */
+    .stat__mini-trend { display: none; }
+
+    /* 趋势图隐藏后没有卡片再用第三行，固定 20px 会留一条空白把卡片顶高。
+       改为 auto 让该行自然塌陷；此时四张卡片都只有两行，仍然对齐 */
+    .stat__body { grid-template-rows: auto auto auto; }
+
+    .monitor-panel__header { padding: var(--sp-3) var(--sp-4); }
+
+    .monitor-panel__content { padding: 0 var(--sp-4) var(--sp-4); }
+
+    .metric-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-2); }
+
+    .metric { padding: var(--sp-3) var(--sp-2); }
+
+    .metric__value { font-size: 1.25rem; }
 
     .toast-host { left: var(--sp-3); right: var(--sp-3); max-width: none; }
 

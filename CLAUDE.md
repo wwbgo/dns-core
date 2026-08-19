@@ -316,7 +316,9 @@ DNS_HOST_PORT=5353 WEB_HOST_PORT=8080 podman compose up -d
 ### Web 管理界面
 
 - `GET /` - Web 管理控制台（index.html）
-- 顶部：服务状态、记录数、缓存条目数、缓存命中率四张统计卡片（不随标签切换）
+- 顶栏常驻服务状态指示灯（圆点 + 文字，健康时缓慢呼吸）
+- 顶部四张统计卡片：当前 QPS（含 60 秒迷你趋势图）、平均延迟、缓存条目、缓存命中率
+- 可折叠的「详细监控数据」面板：请求量与延迟各 6 项指标，折叠状态持久化
 - **标签页「DNS 记录」**：
   - 添加记录表单（记录类型切换时联动 placeholder 与提示）
   - 记录列表（表头吸顶、类型标签着色、泛域名 `*.` 前缀高亮）
@@ -339,6 +341,8 @@ DNS_HOST_PORT=5353 WEB_HOST_PORT=8080 podman compose up -d
 - `PUT /api/upstream` - 修改上游 DNS 配置，**立即生效且持久化**
 - `GET /api/cache/stats` - 缓存统计（条目数、命中率）
 - `DELETE /api/cache` - 清空 DNS 缓存
+- `GET /api/qps` - 查询量统计（各时间窗口聚合值 + 最近 60 秒逐秒序列）
+- `GET /api/qps/latency` - 响应延迟统计（平均/极值/P50/P95/P99）
 - `GET /swagger` - Swagger UI 文档（仅开发模式）
 
 除 `/health` 外，所有 `/api/*` 端点都受 API Key 鉴权与来源网段限制保护。
@@ -355,11 +359,15 @@ Web 管理界面的"上游 DNS 配置"面板可直接修改，保存后立即生
 
 ## 测试
 
-项目包含完整的单元测试（**139 个测试用例**，`dotnet test` 全绿），覆盖以下组件：
+项目包含完整的单元测试（**181 个测试用例**，`dotnet test` 全绿），覆盖以下组件：
 - **协议回归测试** - `tests/DnsCore.Tests/Protocol/DnsProtocolRegressionTests.cs`
   （计数回填、泛域名 owner name、畸形报文、label/域名校验、RCODE、截断、RDATA 编码、压缩）
 - **服务回归测试** - `tests/DnsCore.Tests/Services/ServiceRegressionTests.cs`
   （缓存 TTL 递减/LRU 淘汰/否定缓存、记录存储并发一致性、网段 ACL、限流）
+- **统计回归测试** - `tests/DnsCore.Tests/Services/DnsQueryStatisticsTests.cs`
+  （时间窗口边界、当前小时计入、跨分钟不重复计数、空闲不清空历史、槽位复用不读陈旧值）
+- **延迟统计测试** - `tests/DnsCore.Tests/Services/DnsLatencyStatisticsTests.cs`
+  （NaN/负值/无穷拒绝、环形窗口淘汰、累计极值不随淘汰丢失、百分位、并发读写）
 - **上游设置测试** - `tests/DnsCore.Tests/Services/UpstreamSettingsTests.cs`
   （默认顺序模式、IP 严格校验含 inet_aton 简写、环路防护、运行时生效、
   持久化与重载、损坏/非法持久化文件的容错）
