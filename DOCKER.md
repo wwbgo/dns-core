@@ -446,7 +446,6 @@ docker system prune -a
 
 - [项目主文档](README.md)
 - [项目结构说明](CLAUDE.md)
-- [测试报告](docs/TEST_REPORT.md)
 - [贡献指南](CONTRIBUTING.md)
 
 ## 📞 支持

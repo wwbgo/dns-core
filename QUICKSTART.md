@@ -301,7 +301,7 @@ chmod +x verify-功能.sh
 
 ### 高级功能
 1. [WILDCARD_DNS_GUIDE.md](docs/WILDCARD_DNS_GUIDE.md) - 泛域名使用指南
-2. [DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md) - Docker 部署指南
+2. [DOCKER.md](DOCKER.md) - 容器部署指南（Docker / Podman）
 
 ---
 

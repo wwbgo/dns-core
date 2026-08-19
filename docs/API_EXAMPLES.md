@@ -615,4 +615,4 @@ class DnsApiClient {
 - [README.md](../README.md) - 项目说明
 - [WEB_INTERFACE_GUIDE.md](WEB_INTERFACE_GUIDE.md) - Web 界面使用指南
 - [WILDCARD_DNS_GUIDE.md](WILDCARD_DNS_GUIDE.md) - 泛域名使用指南
-- [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) - Docker 部署指南
+- [DOCKER.md](../DOCKER.md) - 容器部署指南（Docker / Podman）

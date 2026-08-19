@@ -830,7 +830,6 @@ dotnet nuget locals all --clear
 ## 📚 相关文档
 
 - [SCRIPTS.md](../SCRIPTS.md) - 脚本快速参考
-- [scripts/README.md](../scripts/README.md) - 脚本工具集完整说明
 - [QUICKSTART.md](../QUICKSTART.md) - 快速开始指南
 - [README.md](../README.md) - 项目文档
 - [CONTRIBUTING.md](../CONTRIBUTING.md) - 贡献指南

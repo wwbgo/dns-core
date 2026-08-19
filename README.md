@@ -423,7 +423,7 @@ nslookup -vc example.local 127.0.0.1
 
 ### 运行单元测试
 
-项目包含完整的单元测试套件（38个测试用例），覆盖所有核心组件：
+项目包含完整的单元测试套件（226 个测试用例），覆盖所有核心组件：
 
 ```bash
 # 运行所有测试
@@ -439,7 +439,6 @@ dotnet test --verbosity normal
 - ✅ 多种 DNS 记录类型
 - ✅ 域名压缩和解压
 
-详细测试报告请查看 [TEST_REPORT.md](docs/TEST_REPORT.md)
 
 ### 功能测试
 
@@ -513,15 +512,13 @@ curl http://localhost:5000/api/dns/records
 - [docs/API_EXAMPLES.md](docs/API_EXAMPLES.md) - **API 使用示例大全** 📚
 
 ### 部署文档
-- [docs/DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md) - Docker 部署指南
+- [DOCKER.md](DOCKER.md) - 容器部署指南（Docker / Podman）
 
 ### 测试文档
-- [docs/TEST_REPORT.md](docs/TEST_REPORT.md) - 测试报告
-- [docs/TEST_COVERAGE_REPORT.md](docs/TEST_COVERAGE_REPORT.md) - **详细测试覆盖率报告** 📊
 
 ### 脚本工具
 - [SCRIPTS.md](SCRIPTS.md) - **脚本快速参考** 📋
-- [scripts/README.md](scripts/README.md) - **脚本工具集完整说明** 🔧
+- [docs/BUILD_SCRIPTS.md](docs/BUILD_SCRIPTS.md) - **脚本工具集完整说明** 🔧
 
 ## 快速开始
 

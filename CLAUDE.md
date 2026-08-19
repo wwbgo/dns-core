@@ -57,7 +57,6 @@ dns-core/
 │   ├── Services/            # 服务测试
 │   └── DnsCore.Tests.csproj # 测试项目文件
 ├── docs/                    # 项目文档
-│   └── TEST_REPORT.md       # 测试报告
 ├── .editorconfig            # 编辑器配置
 ├── .gitignore              # Git 忽略文件
 ├── CONTRIBUTING.md          # 贡献指南
@@ -359,11 +358,14 @@ Web 管理界面的"上游 DNS 配置"面板可直接修改，保存后立即生
 
 ## 测试
 
-项目包含完整的单元测试（**181 个测试用例**，`dotnet test` 全绿），覆盖以下组件：
+项目包含完整的单元测试（**226 个测试用例**，`dotnet test` 全绿），覆盖以下组件：
 - **协议回归测试** - `tests/DnsCore.Tests/Protocol/DnsProtocolRegressionTests.cs`
   （计数回填、泛域名 owner name、畸形报文、label/域名校验、RCODE、截断、RDATA 编码、压缩）
 - **服务回归测试** - `tests/DnsCore.Tests/Services/ServiceRegressionTests.cs`
   （缓存 TTL 递减/LRU 淘汰/否定缓存、记录存储并发一致性、网段 ACL、限流）
+- **持久化契约测试** - `tests/DnsCore.Tests/Repositories/DnsRecordRepositoryTests.cs`
+  （JSON/SQLite/LiteDB 三种实现跑同一套用例：往返保真、整组替换语义、
+  按类型删除、重开实例后数据仍在、特殊字符与 Unicode）
 - **统计回归测试** - `tests/DnsCore.Tests/Services/DnsQueryStatisticsTests.cs`
   （时间窗口边界、当前小时计入、跨分钟不重复计数、空闲不清空历史、槽位复用不读陈旧值）
 - **延迟统计测试** - `tests/DnsCore.Tests/Services/DnsLatencyStatisticsTests.cs`
@@ -387,7 +389,6 @@ Web 管理界面的"上游 DNS 配置"面板可直接修改，保存后立即生
 - FluentAssertions（流畅断言）
 - Moq（模拟框架）
 
-详细测试报告：`docs/TEST_REPORT.md`
 
 ## 性能优化
 

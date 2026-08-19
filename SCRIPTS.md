@@ -1,6 +1,6 @@
 # 🔧 DNS Core Server - 脚本快速参考
 
-所有脚本的快速参考指南。详细说明请查看 [scripts/README.md](scripts/README.md)
+所有脚本的快速参考指南。详细说明请查看 [docs/BUILD_SCRIPTS.md](docs/BUILD_SCRIPTS.md)
 
 ---
 
@@ -155,7 +155,7 @@ cd publish/linux-x64
 
 完整的脚本说明和使用示例请查看：
 
-👉 **[scripts/README.md](scripts/README.md)** - 脚本工具集完整文档
+👉 **[docs/BUILD_SCRIPTS.md](docs/BUILD_SCRIPTS.md)** - 脚本工具集完整文档
 
 ---
 
@@ -177,4 +177,4 @@ cd publish/linux-x64
 
 ---
 
-**更多详情请查看 [scripts/README.md](scripts/README.md)** 📚
+**更多详情请查看 [docs/BUILD_SCRIPTS.md](docs/BUILD_SCRIPTS.md)** 📚

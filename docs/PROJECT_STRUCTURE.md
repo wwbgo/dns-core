@@ -39,7 +39,6 @@ dns-core/
 │
 ├── docs/                       # 文档目录
 │   ├── PROJECT_STRUCTURE.md    # 本文件
-│   └── TEST_REPORT.md         # 测试报告
 │
 ├── .claude/                    # Claude Code 配置
 ├── .editorconfig              # 编辑器配置
