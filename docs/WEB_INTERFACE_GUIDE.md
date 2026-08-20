@@ -54,7 +54,8 @@ DNS Core Server 提供了一个现代化的 Web 管理界面，让您可以通�
   - 示例值: `ns1.example.com`
 - **MX** - 邮件交换记录
   - 示例值: `mail.example.com`
-- **PTR** - 指针记录
+- **PTR** - 反向解析记录（IP → 域名）
+  - 域名需用反向查询名: `100.1.168.192.in-addr.arpa`
   - 示例值: `host.example.com`
 
 #### 添加记录步骤

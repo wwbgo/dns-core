@@ -9,7 +9,7 @@ public enum DnsRecordType : ushort
     NS = 2,     // 名称服务器
     CNAME = 5,  // 规范名称
     SOA = 6,    // 授权开始
-    PTR = 12,   // 指针记录
+    PTR = 12,   // 反向解析记录（IP → 域名，查询名走 in-addr.arpa / ip6.arpa）
     MX = 15,    // 邮件交换
     TXT = 16,   // 文本
     AAAA = 28,  // IPv6 地址
