@@ -522,18 +522,45 @@ curl http://localhost:5000/api/dns/records
 
 ## 快速开始
 
-### 方法 1: Docker 部署（推荐）
+### 方法 1: 官方镜像部署（推荐）
+
+拉取镜像：
 
 ```bash
-# Windows
-docker-start.bat
-
-# Linux/Mac
-chmod +x docker-start.sh
-./docker-start.sh
+docker pull wwbgo/dns-core:latest
+# 或使用固定版本
+docker pull wwbgo/dns-core:v1.1.0
 ```
 
-或使用 Docker Compose：
+运行容器：
+
+```bash
+docker run -d \
+  --name dns-core-server \
+  -p 53:53/udp \
+  -p 53:53/tcp \
+  -p 5000:5000 \
+  -v ./data:/app/data \
+  --restart unless-stopped \
+  wwbgo/dns-core:latest
+```
+
+Windows PowerShell：
+
+```powershell
+docker run -d `
+  --name dns-core-server `
+  -p 53:53/udp `
+  -p 53:53/tcp `
+  -p 5000:5000 `
+  -v "${PWD}/data:/app/data" `
+  --restart unless-stopped `
+  wwbgo/dns-core:latest
+```
+
+> 宿主机监听 53 端口需要管理员/root 权限，并确保端口未被其他 DNS 服务占用。
+
+也可以使用仓库自带的 `docker-run.sh` / `docker-run.bat`，或使用 Docker Compose：
 
 ```bash
 docker-compose up -d
