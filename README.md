@@ -529,7 +529,7 @@ curl http://localhost:5000/api/dns/records
 ```bash
 docker pull wwbgo/dns-core:latest
 # 或使用固定版本
-docker pull wwbgo/dns-core:v1.1.0
+docker pull wwbgo/dns-core:v1.2.0
 ```
 
 运行容器：
