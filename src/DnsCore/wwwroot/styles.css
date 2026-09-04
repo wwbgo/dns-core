@@ -369,25 +369,6 @@ main {
 
 .nav-item.is-active:hover { background: var(--brand-600); color: #fff; }
 
-.nav-item__badge {
-    display: inline-grid;
-    place-items: center;
-    min-width: 20px;
-    height: 20px;
-    padding: 0 5px;
-    border-radius: var(--r-full);
-    background: rgba(255, 255, 255, .18);
-    color: inherit;
-    font-size: .72rem;
-    font-weight: 750;
-    line-height: 1;
-}
-
-.nav-item:not(.is-active) .nav-item__badge {
-    background: var(--surface-3);
-    color: var(--text-muted);
-}
-
 .nav-item__dot {
     width: 7px;
     height: 7px;
@@ -1307,7 +1288,7 @@ main {
 
 .field__unit, .field__hint { font-weight: 400; color: var(--text-subtle); font-size: .78rem; }
 
-input, select {
+input, select, textarea {
     font: inherit;
     font-size: .92rem;
     color: var(--text);
@@ -1321,12 +1302,14 @@ input, select {
                 background var(--dur) var(--ease);
 }
 
-input::placeholder { color: var(--text-subtle); }
+textarea { min-height: 180px; resize: vertical; line-height: 1.5; }
 
-input:hover, select:hover { border-color: var(--text-subtle); }
+input::placeholder, textarea::placeholder { color: var(--text-subtle); }
+
+input:hover, select:hover, textarea:hover { border-color: var(--text-subtle); }
 
 /* 焦点用色环而非加粗边框，避免输入框尺寸在聚焦时变化导致布局位移 */
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
     outline: none;
     border-color: var(--brand-500);
     box-shadow: var(--ring);
@@ -1362,6 +1345,10 @@ input[aria-invalid='true']:focus {
     font-size: 1rem;
     color: var(--text-muted);
     pointer-events: none;
+}
+
+.form-grid > .form-actions {
+    grid-column: 1 / -1;
 }
 
 .form-actions {
@@ -1407,6 +1394,68 @@ input[aria-invalid='true']:focus {
 }
 
 .search__clear:hover { background: var(--surface-3); color: var(--text); }
+
+/* --- Hosts 导入 ---------------------------------------------------------- */
+.file-picker {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex-wrap: wrap;
+}
+
+.file-picker__name {
+    color: var(--text-muted);
+    font-size: .86rem;
+    word-break: break-all;
+}
+
+.source-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    margin-top: var(--sp-3);
+}
+
+.source-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    padding: var(--sp-3);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+}
+
+.source-item__main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.source-item__name {
+    font-weight: 650;
+    color: var(--text);
+}
+
+.source-item__url {
+    color: var(--text-muted);
+    font-size: .82rem;
+    word-break: break-all;
+}
+
+.source-item__meta {
+    color: var(--text-subtle);
+    font-size: .78rem;
+}
+
+.source-item__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    flex: none;
+}
 
 /* --- 表格 ---------------------------------------------------------------- */
 .table-wrap {
@@ -1714,6 +1763,13 @@ tbody tr:hover .row-del { color: var(--err-fg); border-color: var(--err-line); b
     .topbar__actions { width: 100%; justify-content: flex-end; }
 
     .nav-item { padding: 0 var(--sp-2); }
+
+    .source-item {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .source-item__actions { justify-content: flex-end; }
 
     .form-grid { grid-template-columns: 1fr; }
 

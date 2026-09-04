@@ -79,8 +79,23 @@ const $ = {
 
     // 顶部导航
     navItems: [...document.querySelectorAll('.nav-item[data-view]')],
-    navRecordBadge: document.getElementById('navRecordBadge'),
-    navUpstreamDot: document.getElementById('navUpstreamDot')
+    navUpstreamDot: document.getElementById('navUpstreamDot'),
+
+    // hosts 导入
+    hostsText: document.getElementById('hostsText'),
+    hostsFileInput: document.getElementById('hostsFileInput'),
+    hostsFileBtn: document.getElementById('hostsFileBtn'),
+    hostsFileName: document.getElementById('hostsFileName'),
+    hostsImportTtl: document.getElementById('hostsImportTtl'),
+    importHostsTextBtn: document.getElementById('importHostsTextBtn'),
+    hostsUrlInput: document.getElementById('hostsUrlInput'),
+    importHostsUrlBtn: document.getElementById('importHostsUrlBtn'),
+    hostsSourceForm: document.getElementById('hostsSourceForm'),
+    sourceNameInput: document.getElementById('sourceNameInput'),
+    sourceUrlInput: document.getElementById('sourceUrlInput'),
+    sourceSyncIntervalInput: document.getElementById('sourceSyncIntervalInput'),
+    sourceTtlInput: document.getElementById('sourceTtlInput'),
+    hostsSourcesList: document.getElementById('hostsSourcesList')
 };
 
 const VIEW_STORAGE = 'dnscore.activeView';
@@ -135,6 +150,14 @@ function bindEvents() {
             addServerFromInput();
         }
     });
+
+    // hosts 导入
+    $.hostsFileBtn.addEventListener('click', () => $.hostsFileInput.click());
+    $.hostsFileInput.addEventListener('change', handleHostsFileChange);
+    $.importHostsTextBtn.addEventListener('click', handleHostsTextImport);
+    $.importHostsUrlBtn.addEventListener('click', handleHostsUrlImport);
+    $.hostsSourceForm.addEventListener('submit', handleAddHostsSource);
+    $.hostsSourcesList.addEventListener('click', handleHostsSourceAction);
 
     document.querySelectorAll('.chip--add').forEach(btn => {
         btn.addEventListener('click', () => addServer(btn.dataset.ip));
@@ -212,7 +235,6 @@ function handleNavKeydown(e) {
 
 /// 把记录数与未保存状态同步到顶部导航徽标上
 function updateNavIndicators() {
-    $.navRecordBadge.textContent = allRecords.length.toLocaleString();
     $.navUpstreamDot.hidden = $.upstreamWarn.hidden;
 }
 
@@ -231,6 +253,9 @@ async function loadViewData(viewId) {
             break;
         case 'records':
             await loadRecords(true);
+            break;
+        case 'hosts':
+            await loadHostsSources();
             break;
         case 'upstream':
             await loadUpstreamSettings();
@@ -568,6 +593,202 @@ async function loadCacheStats() {
         $.cacheEntries.textContent = '—';
         $.cacheHitRate.textContent = '—';
         setUnit($.cacheHitRateUnit, '');
+    }
+}
+
+// --- Hosts 导入 ----------------------------------------------------------
+async function loadHostsSources() {
+    try {
+        const response = await apiFetch('/api/hosts/sources');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const sources = await response.json();
+        renderHostsSources(sources);
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            console.error('加载 hosts 来源失败:', error);
+            $.hostsSourcesList.innerHTML = '<div class="source-item">加载失败</div>';
+        }
+    }
+}
+
+function renderHostsSources(sources) {
+    if (!Array.isArray(sources) || sources.length === 0) {
+        $.hostsSourcesList.innerHTML = '<div class="source-item">暂无保存的 hosts URL 来源</div>';
+        return;
+    }
+
+    $.hostsSourcesList.innerHTML = sources.map(source => {
+        const lastSync = source.lastSyncedAtUtc
+            ? new Date(source.lastSyncedAtUtc).toLocaleString()
+            : '尚未同步';
+        const syncError = source.lastSyncError
+            ? ` · ${escapeHtml(source.lastSyncError)}`
+            : '';
+
+        return `
+        <div class="source-item" role="listitem" data-id="${escapeHtml(source.id)}">
+            <div class="source-item__main">
+                <span class="source-item__name">${escapeHtml(source.name)}</span>
+                <span class="source-item__url">${escapeHtml(source.url)}</span>
+                <span class="source-item__meta">
+                    每 ${Number(source.syncIntervalMinutes) || 60} 分钟同步 · TTL ${Number(source.ttl) || 3600}s · 最后同步: ${lastSync}${syncError}
+                </span>
+            </div>
+            <div class="source-item__actions">
+                <button type="button" class="btn btn--sm btn--secondary" data-action="import"
+                        data-url="${escapeHtml(source.url)}" data-ttl="${escapeHtml(String(source.ttl || 3600))}">
+                    <svg aria-hidden="true"><use href="#i-upload"/></svg>
+                    <span>导入</span>
+                </button>
+                <button type="button" class="btn btn--sm btn--danger-ghost" data-action="delete"
+                        data-id="${escapeHtml(source.id)}">
+                    <svg aria-hidden="true"><use href="#i-trash"/></svg>
+                    <span>删除</span>
+                </button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function handleHostsFileChange(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+        $.hostsText.value = String(reader.result ?? '');
+        $.hostsFileName.textContent = file.name;
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+}
+
+async function handleHostsTextImport() {
+    const text = $.hostsText.value.trim();
+    if (!text) {
+        showToast('请粘贴 hosts 内容或选择文件', 'error');
+        return;
+    }
+
+    await importHosts({ text, ttl: hostsImportTtl() });
+}
+
+async function handleHostsUrlImport() {
+    const url = $.hostsUrlInput.value.trim();
+    if (!url) {
+        showToast('请输入 hosts URL', 'error');
+        return;
+    }
+
+    await importHosts({ url, ttl: hostsImportTtl() });
+}
+
+function hostsImportTtl() {
+    const ttl = parseInt($.hostsImportTtl.value, 10);
+    return Number.isFinite(ttl) && ttl > 0 ? ttl : 3600;
+}
+
+async function importHosts(payload) {
+    try {
+        const response = await apiFetch('/api/hosts/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        showToast(`导入 ${result.imported} 条，跳过重复 ${result.skippedDuplicates} 条`, 'success');
+        await loadRecords(true);
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            console.error('导入 hosts 失败:', error);
+            showToast(`导入失败: ${error.message}`, 'error');
+        }
+    }
+}
+
+async function handleAddHostsSource(event) {
+    event.preventDefault();
+
+    const payload = {
+        name: $.sourceNameInput.value.trim(),
+        url: $.sourceUrlInput.value.trim(),
+        syncIntervalMinutes: parseInt($.sourceSyncIntervalInput.value, 10) || 60,
+        ttl: parseInt($.sourceTtlInput.value, 10) || 3600
+    };
+
+    if (!payload.name || !payload.url) {
+        showToast('请填写名称和 URL', 'error');
+        return;
+    }
+
+    if (payload.syncIntervalMinutes < 1 || payload.syncIntervalMinutes > 10080) {
+        showToast('同步周期必须在 1–10080 分钟之间', 'error');
+        return;
+    }
+
+    if (payload.ttl < 1) {
+        showToast('TTL 必须为正整数', 'error');
+        return;
+    }
+
+    try {
+        const response = await apiFetch('/api/hosts/sources', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || `HTTP ${response.status}`);
+        }
+
+        showToast('hosts URL 来源已添加', 'success');
+        $.hostsSourceForm.reset();
+        await loadHostsSources();
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            console.error('添加 hosts 来源失败:', error);
+            showToast(`添加失败: ${error.message}`, 'error');
+        }
+    }
+}
+
+async function handleHostsSourceAction(event) {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+
+    if (button.dataset.action === 'import') {
+        const ttl = Number(button.dataset.ttl) || hostsImportTtl();
+        await importHosts({ url: button.dataset.url, ttl });
+        return;
+    }
+
+    if (button.dataset.action === 'delete') {
+        const id = button.dataset.id;
+        if (!id) return;
+
+        try {
+            const response = await apiFetch(`/api/hosts/sources/${encodeURIComponent(id)}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            showToast('hosts URL 来源已删除', 'success');
+            await loadHostsSources();
+        } catch (error) {
+            if (error.message !== 'Unauthorized') {
+                console.error('删除 hosts 来源失败:', error);
+                showToast('删除失败', 'error');
+            }
+        }
     }
 }
 
@@ -1015,7 +1236,7 @@ async function loadRecords(silent = false) {
         allRecords = Array.isArray(records) ? records : [];
 
         $.recordCount.textContent = allRecords.length.toLocaleString();
-        renderRecords(allRecords);
+        applySearchFilter();
         updateNavIndicators();
 
         if (!silent) {
@@ -1242,9 +1463,12 @@ async function handleClearAll() {
 }
 
 // --- 搜索 -----------------------------------------------------------------
-function handleSearch(e) {
-    const query = e.target.value.trim().toLowerCase();
+function handleSearch() {
+    applySearchFilter();
+}
 
+function applySearchFilter() {
+    const query = $.searchInput.value.trim().toLowerCase();
     $.searchClear.hidden = !query;
 
     if (!query) {
@@ -1266,9 +1490,7 @@ function handleSearch(e) {
 
 function clearSearch() {
     $.searchInput.value = '';
-    $.searchClear.hidden = true;
-    renderRecords(allRecords);
-    $.filterCount.textContent = '';
+    applySearchFilter();
 }
 
 // --- 刷新 -----------------------------------------------------------------

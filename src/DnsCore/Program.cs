@@ -18,6 +18,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddHttpClient();
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -66,6 +67,16 @@ builder.Services.AddSingleton<IDnsRecordRepository>(sp =>
 
 // ==== DNS 服务 ====
 builder.Services.AddSingleton<CustomRecordStore>();
+builder.Services.AddSingleton(sp => new HostsSourceStore(
+    sp.GetRequiredService<ILogger<HostsSourceStore>>(),
+    "data/hosts-sources.json"));
+var allowLoopbackHostsImport = builder.Configuration.GetValue<bool?>("HostsImport:AllowLoopback") ?? false;
+builder.Services.AddSingleton(sp => new HostsImportService(
+    sp.GetRequiredService<ILogger<HostsImportService>>(),
+    sp.GetRequiredService<CustomRecordStore>(),
+    sp.GetRequiredService<IHttpClientFactory>(),
+    allowLoopbackHostsImport));
+builder.Services.AddHostedService<HostsSyncService>();
 builder.Services.AddSingleton<DnsCache>();
 builder.Services.AddSingleton<UpstreamDnsResolver>();
 builder.Services.AddSingleton<UpstreamSettingsStore>();
@@ -92,6 +103,9 @@ if (dnsOptions.CustomRecords.Count > 0)
 // 必须在 DnsServer 启动（HostedService）之前完成，否则首批查询会用到旧配置。
 var upstreamSettingsStore = app.Services.GetRequiredService<UpstreamSettingsStore>();
 await upstreamSettingsStore.LoadAsync();
+
+var hostsSourceStore = app.Services.GetRequiredService<HostsSourceStore>();
+await hostsSourceStore.LoadAsync();
 
 if (app.Environment.IsDevelopment())
 {
@@ -203,6 +217,55 @@ dnsApi.MapDelete("/records", async (CustomRecordStore store) =>
     return Results.NoContent();
 })
 .WithName("ClearAllRecords");
+
+// ==== hosts 导入 ====
+var hostsApi = app.MapGroup("/api/hosts").WithTags("Hosts Import");
+
+hostsApi.MapGet("/sources", async (HostsSourceStore store) =>
+    Results.Ok(await store.GetAllAsync()))
+    .WithName("GetHostsSources");
+
+hostsApi.MapPost("/sources", async (HostsSourceRequest request, HostsSourceStore store) =>
+{
+    try
+    {
+        var source = await store.AddAsync(
+            request.Name,
+            request.Url,
+            request.SyncIntervalMinutes,
+            request.Ttl);
+        return Results.Created($"/api/hosts/sources/{source.Id}", source);
+    }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+})
+.WithName("AddHostsSource");
+
+hostsApi.MapDelete("/sources/{id}", async (string id, HostsSourceStore store) =>
+{
+    var removed = await store.RemoveAsync(id);
+    return removed ? Results.NoContent() : Results.NotFound();
+})
+.WithName("DeleteHostsSource");
+
+hostsApi.MapPost("/import", async (HostsImportRequest request, HostsImportService importer) =>
+{
+    try
+    {
+        var result = string.IsNullOrWhiteSpace(request.Url)
+            ? await importer.ImportTextAsync(request.Text ?? "", request.Ttl)
+            : await importer.ImportUrlAsync(request.Url, request.Ttl);
+
+        return Results.Ok(result);
+    }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+    {
+        return Results.BadRequest(new { error = ex is TaskCanceledException ? "hosts URL 请求超时" : ex.Message });
+    }
+})
+.WithName("ImportHosts");
 
 // ==== 上游 DNS 配置 ====
 // 注意：改写上游等于改写全部客户端的解析结果，属于高危操作。
@@ -346,4 +409,19 @@ static bool TryValidateRecord(DnsRecord? record, out string error)
     }
 
     return true;
+}
+
+internal sealed record HostsSourceRequest
+{
+    public required string Name { get; init; }
+    public required string Url { get; init; }
+    public int SyncIntervalMinutes { get; init; } = 60;
+    public int Ttl { get; init; } = 3600;
+}
+
+internal sealed record HostsImportRequest
+{
+    public string? Text { get; init; }
+    public string? Url { get; init; }
+    public int Ttl { get; init; } = 3600;
 }
