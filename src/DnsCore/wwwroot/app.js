@@ -7,6 +7,7 @@ const API_KEY_STORAGE = 'dnscore.apiKey';
 const THEME_STORAGE = 'dnscore.theme';
 
 let allRecords = [];
+let editingRecord = null;
 
 // DOM 元素
 const $ = {
@@ -41,12 +42,20 @@ const $ = {
     searchClear: document.getElementById('searchClear'),
     filterCount: document.getElementById('filterCount'),
     addRecordForm: document.getElementById('addRecordForm'),
+    recordFormTitle: document.getElementById('recordFormTitle'),
+    recordFormIcon: document.getElementById('recordFormIcon'),
+    recordSubmitBtn: document.getElementById('recordSubmitBtn'),
+    recordSubmitIcon: document.getElementById('recordSubmitIcon'),
+    recordSubmitText: document.getElementById('recordSubmitText'),
+    cancelEditBtn: document.getElementById('cancelEditBtn'),
     clearAllBtn: document.getElementById('clearAllBtn'),
     recordsTable: document.getElementById('recordsTable'),
     recordsBody: document.getElementById('recordsBody'),
     typeSelect: document.getElementById('type'),
     domainInput: document.getElementById('domain'),
     valueInput: document.getElementById('value'),
+    weightInput: document.getElementById('weight'),
+    weightField: document.getElementById('weightField'),
     valueHint: document.getElementById('valueHint'),
     toastHost: document.getElementById('toastHost'),
 
@@ -68,13 +77,13 @@ const $ = {
     effectiveList: document.getElementById('effectiveList'),
     orderLive: document.getElementById('orderLive'),
 
-    // 标签页
-    tabs: [...document.querySelectorAll('[role="tab"]')],
-    tabRecordBadge: document.getElementById('tabRecordBadge'),
-    tabUpstreamDot: document.getElementById('tabUpstreamDot')
+    // 顶部导航
+    navItems: [...document.querySelectorAll('.nav-item[data-view]')],
+    navRecordBadge: document.getElementById('navRecordBadge'),
+    navUpstreamDot: document.getElementById('navUpstreamDot')
 };
 
-const TAB_STORAGE = 'dnscore.activeTab';
+const VIEW_STORAGE = 'dnscore.activeView';
 const DETAILS_STORAGE = 'dnscore.monitorOpen';
 
 // 上游配置的本地编辑状态；savedUpstream 用于"放弃修改"与脏检查
@@ -86,24 +95,19 @@ document.addEventListener('DOMContentLoaded', init);
 
 function init() {
     restoreTheme();
-    restoreTab();
     restoreStatsDetails();
     updateKeyBadge();
     bindEvents();
+    restoreView();
     checkServerHealth();
-    loadRecords();
-    loadCacheStats();
-    loadQueryStats();
-    loadLatencyStats();
-    loadUpstreamSettings();
     startAutoRefresh();
 }
 
 function bindEvents() {
-    // 标签页：点击切换 + 方向键导航（WAI-ARIA tabs 模式）
-    $.tabs.forEach(tab => {
-        tab.addEventListener('click', () => activateTab(tab.id));
-        tab.addEventListener('keydown', handleTabKeydown);
+    // 顶部导航：点击切换 + 方向键导航
+    $.navItems.forEach(item => {
+        item.addEventListener('click', () => activateView(item.dataset.view));
+        item.addEventListener('keydown', handleNavKeydown);
     });
 
     $.apiKeyBtn.addEventListener('click', showApiKeyDialog);
@@ -112,6 +116,7 @@ function bindEvents() {
     $.searchInput.addEventListener('input', handleSearch);
     $.searchClear.addEventListener('click', clearSearch);
     $.addRecordForm.addEventListener('submit', handleAddRecord);
+    $.cancelEditBtn.addEventListener('click', resetRecordForm);
     $.clearAllBtn.addEventListener('click', handleClearAll);
     $.typeSelect.addEventListener('change', updateFormHints);
     updateFormHints();
@@ -143,68 +148,105 @@ function bindEvents() {
     });
 }
 
-// --- 标签页 ---------------------------------------------------------------
-function restoreTab() {
-    const saved = localStorage.getItem(TAB_STORAGE);
-    // 只接受已知的 tab id，避免陈旧/伪造值导致两个面板都被隐藏
-    if (saved && $.tabs.some(t => t.id === saved)) {
-        activateTab(saved, { focus: false });
-    }
+// --- 顶部导航视图 ---------------------------------------------------------
+function restoreView() {
+    const saved = localStorage.getItem(VIEW_STORAGE);
+    const valid = $.navItems.some(item => item.dataset.view === saved);
+    activateView(valid ? saved : 'monitor', { focus: false });
 }
 
-function activateTab(tabId, options = {}) {
+function activateView(viewId, options = {}) {
     const { focus = false } = options;
+    const normalized = $.navItems.some(item => item.dataset.view === viewId) ? viewId : 'monitor';
 
-    $.tabs.forEach(tab => {
-        const selected = tab.id === tabId;
-        const panel = document.getElementById(tab.getAttribute('aria-controls'));
+    $.navItems.forEach(item => {
+        const selected = item.dataset.view === normalized;
+        item.classList.toggle('is-active', selected);
 
-        tab.classList.toggle('is-active', selected);
-        tab.setAttribute('aria-selected', String(selected));
-        // 标签组内只保留一个 Tab 落点，方向键负责组内移动
-        tab.tabIndex = selected ? 0 : -1;
+        if (selected) {
+            item.setAttribute('aria-current', 'page');
+        } else {
+            item.removeAttribute('aria-current');
+        }
+    });
 
-        if (panel) panel.hidden = !selected;
+    document.querySelectorAll('.view[data-view]').forEach(view => {
+        view.hidden = view.dataset.view !== normalized;
     });
 
     if (focus) {
-        document.getElementById(tabId)?.focus();
+        const activeItem = $.navItems.find(item => item.dataset.view === normalized);
+        activeItem?.focus();
     }
 
-    localStorage.setItem(TAB_STORAGE, tabId);
+    localStorage.setItem(VIEW_STORAGE, normalized);
+    loadViewData(normalized);
 }
 
-function handleTabKeydown(e) {
-    const index = $.tabs.findIndex(t => t.id === e.currentTarget.id);
+function handleNavKeydown(e) {
+    const index = $.navItems.indexOf(e.currentTarget);
     let next = null;
 
     switch (e.key) {
         case 'ArrowRight':
         case 'ArrowDown':
-            next = (index + 1) % $.tabs.length;
+            next = (index + 1) % $.navItems.length;
             break;
         case 'ArrowLeft':
         case 'ArrowUp':
-            next = (index - 1 + $.tabs.length) % $.tabs.length;
+            next = (index - 1 + $.navItems.length) % $.navItems.length;
             break;
         case 'Home':
             next = 0;
             break;
         case 'End':
-            next = $.tabs.length - 1;
+            next = $.navItems.length - 1;
             break;
         default:
             return;
     }
 
     e.preventDefault();
-    activateTab($.tabs[next].id, { focus: true });
+    activateView($.navItems[next].dataset.view, { focus: true });
 }
 
-/// 把记录数与未保存状态同步到标签上，便于在另一个标签页时也能看到
-function updateTabIndicators() {
-    $.tabRecordBadge.textContent = allRecords.length.toLocaleString();
-    $.tabUpstreamDot.hidden = $.upstreamWarn.hidden;
+/// 把记录数与未保存状态同步到顶部导航徽标上
+function updateNavIndicators() {
+    $.navRecordBadge.textContent = allRecords.length.toLocaleString();
+    $.navUpstreamDot.hidden = $.upstreamWarn.hidden;
+}
+
+function getActiveView() {
+    return $.navItems.find(item => item.classList.contains('is-active'))?.dataset.view || 'monitor';
+}
+
+async function loadViewData(viewId) {
+    switch (viewId) {
+        case 'monitor':
+            await Promise.all([
+                loadCacheStats(),
+                loadQueryStats(),
+                loadLatencyStats()
+            ]);
+            break;
+        case 'records':
+            await loadRecords(true);
+            break;
+        case 'upstream':
+            await loadUpstreamSettings();
+            break;
+    }
+}
+
+async function refreshActiveView() {
+    await checkServerHealth();
+
+    const viewId = getActiveView();
+    if (viewId === 'upstream' && !$.upstreamWarn.hidden) {
+        return;
+    }
+
+    await loadViewData(viewId);
 }
 
 // --- 监控面板折叠状态 -----------------------------------------------------
@@ -342,13 +384,9 @@ async function apiFetch(url, options = {}) {
     return response;
 }
 
-/// 重新加载全部数据（用于填入密钥后的恢复）
+/// 重新加载当前视图数据（用于填入密钥后的恢复）
 function refreshAll() {
-    checkServerHealth();
-    loadRecords(true);
-    loadCacheStats();
-    loadQueryStats();
-    loadUpstreamSettings();
+    refreshActiveView();
 }
 
 // --- 表单提示更新 ---------------------------------------------------------
@@ -372,6 +410,10 @@ function updateFormHints() {
     $.domainInput.placeholder = h.domain;
     $.valueInput.placeholder = h.value;
     $.valueHint.textContent = h.hint;
+
+    const supportsWeight = type === 'A' || type === 'AAAA';
+    $.weightField.hidden = !supportsWeight;
+    if (!supportsWeight) $.weightInput.value = '1';
 }
 
 // --- 健康检查 & 缓存统计 --------------------------------------------------
@@ -909,8 +951,8 @@ function updateUpstreamDirtyState() {
     $.upstreamWarn.hidden = !dirty;
     $.resetUpstreamBtn.disabled = !dirty;
 
-    // 在 DNS 记录标签页时也能看到上游有未保存改动
-    updateTabIndicators();
+    // 顶部导航上游菜单上同步未保存状态
+    updateNavIndicators();
 }
 
 async function handleSaveUpstream(e) {
@@ -959,7 +1001,7 @@ async function handleSaveUpstream(e) {
 // --- 记录管理 -------------------------------------------------------------
 async function loadRecords(silent = false) {
     if (!silent) {
-        $.recordsBody.innerHTML = '<tr class="state-row"><td colspan="5"><span class="spinner"></span> 加载中…</td></tr>';
+        $.recordsBody.innerHTML = '<tr class="state-row"><td colspan="6"><span class="spinner"></span> 加载中…</td></tr>';
     }
 
     try {
@@ -974,7 +1016,7 @@ async function loadRecords(silent = false) {
 
         $.recordCount.textContent = allRecords.length.toLocaleString();
         renderRecords(allRecords);
-        updateTabIndicators();
+        updateNavIndicators();
 
         if (!silent) {
             showToast(`成功加载 ${allRecords.length} 条记录`, 'success');
@@ -982,7 +1024,7 @@ async function loadRecords(silent = false) {
     } catch (error) {
         if (error.message !== 'Unauthorized') {
             console.error('加载记录失败:', error);
-            $.recordsBody.innerHTML = `<tr class="state-row state-row--error"><td colspan="5">加载失败: ${escapeHtml(error.message)}</td></tr>`;
+            $.recordsBody.innerHTML = `<tr class="state-row state-row--error"><td colspan="6">加载失败: ${escapeHtml(error.message)}</td></tr>`;
             showToast('加载记录失败', 'error');
         }
     }
@@ -992,7 +1034,7 @@ function renderRecords(records) {
     if (records.length === 0) {
         $.recordsBody.innerHTML = `
             <tr class="state-row">
-                <td colspan="5">
+                <td colspan="6">
                     <div class="empty-state">
                         <svg><use href="#i-inbox"/></svg>
                         <strong>暂无记录</strong>
@@ -1010,14 +1052,22 @@ function renderRecords(records) {
             : escapeHtml(rec.domain);
 
         return `
-            <tr data-domain="${escapeHtml(rec.domain)}" data-type="${escapeHtml(rec.type)}">
+            <tr data-domain="${escapeHtml(rec.domain)}" data-type="${escapeHtml(rec.type)}" data-value="${escapeHtml(rec.value)}"
+                data-ttl="${escapeHtml(String(rec.ttl))}" data-weight="${escapeHtml(String(rec.weight ?? 1))}">
                 <td data-label="域名" class="rec-domain">${domainDisplay}</td>
                 <td data-label="类型"><span class="tag tag--${escapeHtml(rec.type)}">${escapeHtml(rec.type)}</span></td>
-                <td data-label="记录值" class="rec-value"><div class="rec-value__text">${escapeHtml(rec.value)}</div></td>
+                <td data-label="记录值" class="rec-value">
+                    <div class="rec-value__text">${escapeHtml(rec.value)}</div>
+                </td>
+                <td data-label="权重" class="rec-weight num">${rec.type === 'A' || rec.type === 'AAAA' ? rec.weight ?? 1 : ''}</td>
                 <td data-label="TTL" class="rec-ttl num">${rec.ttl.toLocaleString()}s</td>
                 <td class="col-actions">
+                    <button type="button" class="row-edit" title="编辑记录"
+                            aria-label="编辑 ${escapeHtml(rec.domain)} ${escapeHtml(rec.type)} ${escapeHtml(rec.value)}">
+                        <svg aria-hidden="true"><use href="#i-edit"/></svg>
+                    </button>
                     <button type="button" class="row-del" title="删除记录"
-                            aria-label="删除 ${escapeHtml(rec.domain)} ${escapeHtml(rec.type)}">
+                            aria-label="删除 ${escapeHtml(rec.domain)} ${escapeHtml(rec.type)} ${escapeHtml(rec.value)}">
                         <svg aria-hidden="true"><use href="#i-trash"/></svg>
                     </button>
                 </td>
@@ -1027,9 +1077,54 @@ function renderRecords(records) {
     $.recordsBody.innerHTML = html;
 
     // 用事件委托替代 inline onclick，避免 JS 字符串转义问题
+    $.recordsBody.querySelectorAll('.row-edit').forEach(btn => {
+        btn.addEventListener('click', handleEditRecord);
+    });
     $.recordsBody.querySelectorAll('.row-del').forEach(btn => {
         btn.addEventListener('click', handleDeleteRecord);
     });
+}
+
+function handleEditRecord(event) {
+    const row = event.currentTarget.closest('tr');
+    const record = {
+        domain: row.dataset.domain,
+        type: row.dataset.type,
+        value: row.dataset.value,
+        ttl: Number(row.dataset.ttl),
+        weight: Number(row.dataset.weight)
+    };
+
+    editingRecord = record;
+    $.domainInput.value = record.domain;
+    $.typeSelect.value = record.type;
+    $.valueInput.value = record.value;
+    document.getElementById('ttl').value = record.ttl;
+    $.weightInput.value = record.weight || 1;
+
+    updateFormHints();
+    setRecordFormMode('edit');
+    $.domainInput.focus();
+}
+
+function setRecordFormMode(mode) {
+    const editing = mode === 'edit';
+
+    $.recordFormTitle.textContent = editing ? '编辑 DNS 记录' : '添加 DNS 记录';
+    $.recordFormIcon.setAttribute('href', editing ? '#i-edit' : '#i-plus');
+    $.recordSubmitIcon.setAttribute('href', editing ? '#i-check' : '#i-plus');
+    $.recordSubmitText.textContent = editing ? '保存修改' : '添加记录';
+    $.cancelEditBtn.hidden = !editing;
+}
+
+function resetRecordForm() {
+    editingRecord = null;
+    $.addRecordForm.reset();
+    $.typeSelect.value = 'A';
+    document.getElementById('ttl').value = '3600';
+    $.weightInput.value = '1';
+    updateFormHints();
+    setRecordFormMode('add');
 }
 
 async function handleAddRecord(e) {
@@ -1040,7 +1135,8 @@ async function handleAddRecord(e) {
         domain: formData.get('domain').trim(),
         type: formData.get('type'),
         value: formData.get('value').trim(),
-        ttl: parseInt(formData.get('ttl'), 10)
+        ttl: parseInt(formData.get('ttl'), 10),
+        weight: parseInt(formData.get('weight'), 10) || 1
     };
 
     if (!record.domain || !record.value) {
@@ -1053,9 +1149,20 @@ async function handleAddRecord(e) {
         return;
     }
 
+    if (!Number.isInteger(record.weight) || record.weight < 1 || record.weight > 1000) {
+        showToast('权重必须是 1–1000 的整数', 'error');
+        return;
+    }
+
     try {
-        const response = await apiFetch(`${API_BASE}/records`, {
-            method: 'POST',
+        const editing = editingRecord;
+        const url = editing
+            ? `${API_BASE}/records/${encodeURIComponent(editing.domain)}/${editing.type}?value=${encodeURIComponent(editing.value)}`
+            : `${API_BASE}/records`;
+        const method = editing ? 'PUT' : 'POST';
+
+        const response = await apiFetch(url, {
+            method,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(record)
         });
@@ -1065,16 +1172,14 @@ async function handleAddRecord(e) {
             throw new Error(error.error || `HTTP ${response.status}`);
         }
 
-        showToast(`已添加记录: ${record.domain}`, 'success');
-        e.target.reset();
-        $.typeSelect.value = 'A';
-        document.getElementById('ttl').value = '3600';
-        updateFormHints();
+        showToast(editing ? `已更新记录: ${record.domain}` : `已添加记录: ${record.domain}`, 'success');
+        resetRecordForm();
         await loadRecords();
     } catch (error) {
         if (error.message !== 'Unauthorized') {
-            console.error('添加记录失败:', error);
-            showToast(`添加失败: ${error.message}`, 'error');
+            const action = editingRecord ? '更新' : '添加';
+            console.error(`${action}记录失败:`, error);
+            showToast(`${action}失败: ${error.message}`, 'error');
         }
     }
 }
@@ -1084,21 +1189,25 @@ async function handleDeleteRecord(event) {
     const row = btn.closest('tr');
     const domain = row.dataset.domain;
     const type = row.dataset.type;
+    const value = row.dataset.value;
 
-    if (!confirm(`确定要删除 ${domain} (${type}) 吗？`)) {
+    const recordLabel = `${domain} (${type})${value ? ` ${value}` : ''}`;
+    if (!confirm(`确定要删除 ${recordLabel} 吗？`)) {
         return;
     }
 
     try {
-        const response = await apiFetch(`${API_BASE}/records/${encodeURIComponent(domain)}/${type}`, {
-            method: 'DELETE'
-        });
+        const query = value ? `?value=${encodeURIComponent(value)}` : '';
+        const response = await apiFetch(
+            `${API_BASE}/records/${encodeURIComponent(domain)}/${type}${query}`,
+            { method: 'DELETE' }
+        );
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
 
-        showToast(`已删除记录: ${domain}`, 'success');
+        showToast(`已删除记录: ${recordLabel}`, 'success');
         await loadRecords();
     } catch (error) {
         if (error.message !== 'Unauthorized') {
@@ -1147,7 +1256,8 @@ function handleSearch(e) {
     const filtered = allRecords.filter(rec =>
         rec.domain.toLowerCase().includes(query) ||
         rec.type.toLowerCase().includes(query) ||
-        rec.value.toLowerCase().includes(query)
+        rec.value.toLowerCase().includes(query) ||
+        String(rec.weight ?? 1).includes(query)
     );
 
     renderRecords(filtered);
@@ -1166,28 +1276,20 @@ async function handleRefresh() {
     $.refreshBtn.classList.add('is-busy');
     $.refreshBtn.disabled = true;
 
-    await Promise.all([
-        checkServerHealth(),
-        loadRecords(true),
-        loadCacheStats(),
-        loadQueryStats(),
-        loadLatencyStats(),
-        // 只在没有未保存改动时重载上游配置，否则会覆盖用户正在编辑的内容
-        $.upstreamWarn.hidden ? loadUpstreamSettings() : Promise.resolve()
-    ]).finally(() => {
+    try {
+        await refreshActiveView();
+        showToast('已刷新', 'info');
+    } finally {
         $.refreshBtn.classList.remove('is-busy');
         $.refreshBtn.disabled = false;
-    });
-
-    showToast('已刷新', 'info');
+    }
 }
 
 function startAutoRefresh() {
     setInterval(() => {
-        loadRecords(true);
-        loadCacheStats();
-        loadQueryStats();
-        loadLatencyStats();
+        const viewId = getActiveView();
+        if (viewId === 'upstream' && !$.upstreamWarn.hidden) return;
+        loadViewData(viewId);
     }, 30000);
 }
 

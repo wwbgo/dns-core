@@ -300,6 +300,61 @@ public sealed class CustomRecordStore(
         return removed;
     }
 
+    /// <summary>删除指定值的单条记录，同域名同类型下其它值保持不变</summary>
+    public async Task<bool> RemoveRecordAsync(string domain, DnsRecordType type, string value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+
+        var key = GetKey(domain.TrimEnd('.'), type);
+        const int MaxRetries = 100;
+
+        for (var attempt = 0; attempt < MaxRetries; attempt++)
+        {
+            if (!_records.TryGetValue(key, out var existing))
+                return false;
+
+            var match = existing.FirstOrDefault(r =>
+                string.Equals(r.Value, value, StringComparison.Ordinal));
+
+            if (match is null)
+                return false;
+
+            var updated = existing.Remove(match);
+            if (updated.IsEmpty)
+            {
+                var pair = KeyValuePair.Create(key, existing);
+                if (((ICollection<KeyValuePair<string, ImmutableList<DnsRecord>>>)_records).Remove(pair))
+                {
+                    logger.LogInformation("已删除自定义记录: {Domain} {Type} {Value}", domain, type, value);
+                    await SaveToPersistenceAsync();
+                    return true;
+                }
+
+                // CAS 失败说明有并发写入，让出时间片后重试
+                await Task.Yield();
+                continue;
+            }
+
+            if (_records.TryUpdate(key, updated, existing))
+            {
+                logger.LogInformation("已删除自定义记录: {Domain} {Type} {Value}", domain, type, value);
+                await SaveToPersistenceAsync();
+                return true;
+            }
+
+            // CAS 失败说明有并发写入，让出时间片后重试
+            await Task.Yield();
+        }
+
+        throw new InvalidOperationException(
+            $"删除记录失败：超过最大重试次数 ({MaxRetries})，存在高并发冲突");
+    }
+
+    /// <summary>删除指定值的单条记录（同步版本）</summary>
+    public bool RemoveRecord(string domain, DnsRecordType type, string value)
+        => RemoveRecordAsync(domain, type, value).GetAwaiter().GetResult();
+
     /// <summary>删除记录（同步版本，保持向后兼容）</summary>
     public bool RemoveRecord(string domain, DnsRecordType type)
         => RemoveRecordAsync(domain, type).GetAwaiter().GetResult();

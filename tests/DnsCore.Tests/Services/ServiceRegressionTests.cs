@@ -249,6 +249,33 @@ public class ServiceRegressionTests
         store.Query("dup.example.com", DnsRecordType.A).Should().HaveCount(1);
     }
 
+    [Fact]
+    public async Task Store_ShouldRemoveOnlyRequestedValue()
+    {
+        var store = CreateStore();
+        store.AddRecord(Record("multi.example.com", "1.1.1.1"));
+        store.AddRecord(Record("multi.example.com", "1.1.1.2"));
+
+        var removed = await store.RemoveRecordAsync("multi.example.com", DnsRecordType.A, "1.1.1.1");
+
+        removed.Should().BeTrue();
+        var remaining = store.Query("multi.example.com", DnsRecordType.A);
+        remaining.Should().ContainSingle();
+        remaining![0].Value.Should().Be("1.1.1.2");
+    }
+
+    [Fact]
+    public async Task Store_ShouldReturnFalse_WhenRequestedValueDoesNotExist()
+    {
+        var store = CreateStore();
+        store.AddRecord(Record("multi.example.com", "1.1.1.1"));
+
+        var removed = await store.RemoveRecordAsync("multi.example.com", DnsRecordType.A, "1.1.1.2");
+
+        removed.Should().BeFalse();
+        store.Query("multi.example.com", DnsRecordType.A).Should().ContainSingle();
+    }
+
     // ==== 网段 ACL ====
 
     [Theory]

@@ -42,10 +42,13 @@ public sealed class LiteDbRepository : IDnsRecordRepository, IDisposable
 
     public Task AddAsync(DnsRecord record)
     {
-        // 删除已存在的相同记录
+        // 仅替换完全相同的记录，同域名同类型下的不同值应保留
         _collection.DeleteMany(r =>
             r.Domain.Equals(record.Domain, StringComparison.OrdinalIgnoreCase) &&
-            r.Type == record.Type);
+            r.Type == record.Type &&
+            r.Value == record.Value &&
+            r.TTL == record.TTL &&
+            r.Weight == record.Weight);
 
         _collection.Insert(record);
         return Task.CompletedTask;

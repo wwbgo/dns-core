@@ -74,10 +74,13 @@ public sealed class JsonFileRepository : IDnsRecordRepository
     {
         var records = (await LoadAllAsync()).ToList();
 
-        // 删除已存在的相同记录
+        // 仅替换完全相同的记录，同域名同类型下的不同值应保留
         records.RemoveAll(r =>
             r.Domain.Equals(record.Domain, StringComparison.OrdinalIgnoreCase) &&
-            r.Type == record.Type);
+            r.Type == record.Type &&
+            string.Equals(r.Value, record.Value, StringComparison.Ordinal) &&
+            r.TTL == record.TTL &&
+            r.Weight == record.Weight);
 
         records.Add(record);
         await SaveAllAsync(records);

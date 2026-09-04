@@ -5,6 +5,7 @@
 ## 功能特性
 
 - ✅ 自定义 DNS 记录（A, AAAA, CNAME, TXT 等）
+- ✅ **同一域名多 IP 解析**（支持多条 A/AAAA 记录，并可按权重轮询）
 - ✅ **泛域名支持**（使用 `*.example.com` 匹配所有子域名）
 - ✅ **多种持久化方案**（支持 JSON 文件、SQLite、LiteDB 三种存储方式）
 - ✅ 上游 DNS 转发（支持自定义或使用系统默认 DNS）
@@ -111,7 +112,8 @@ Web 界面包含以下功能：
 - `GET /api/dns/records` - 获取所有自定义记录
 - `POST /api/dns/records` - 添加自定义记录
 - `GET /api/dns/records/{domain}/{type}` - 查询指定记录
-- `DELETE /api/dns/records/{domain}/{type}` - 删除指定记录
+- `PUT /api/dns/records/{domain}/{type}` - 更新记录；传 `?value=` 时替换单条，不传时整组替换
+- `DELETE /api/dns/records/{domain}/{type}` - 删除记录；传 `?value=` 时删除单条，不传时删除整组
 - `DELETE /api/dns/records` - 清空所有自定义记录
 
 ### API 使用示例
@@ -124,7 +126,8 @@ curl -X POST http://localhost:5000/api/dns/records \
     "domain": "example.local",
     "type": "A",
     "value": "192.168.1.100",
-    "ttl": 3600
+    "ttl": 3600,
+    "weight": 1
   }'
 ```
 

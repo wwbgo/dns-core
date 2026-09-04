@@ -1,5 +1,7 @@
 using DnsCore.Models;
 using DnsCore.Repositories;
+using FluentAssertions;
+using Microsoft.Data.Sqlite;
 
 namespace DnsCore.Tests.Repositories;
 
@@ -50,8 +52,8 @@ public sealed class DnsRecordRepositoryTests : IDisposable
     }
 
     private static DnsRecord Rec(string domain, DnsRecordType type = DnsRecordType.A,
-        string value = "192.168.1.1", int ttl = 3600) =>
-        new() { Domain = domain, Type = type, Value = value, TTL = ttl };
+        string value = "192.168.1.1", int ttl = 3600, int weight = 1) =>
+        new() { Domain = domain, Type = type, Value = value, TTL = ttl, Weight = weight };
 
     [Theory]
     [MemberData(nameof(Providers))]
@@ -93,6 +95,19 @@ public sealed class DnsRecordRepositoryTests : IDisposable
         Assert.Equal(original.Type, loaded.Type);
         Assert.Equal(original.Value, loaded.Value);
         Assert.Equal(original.TTL, loaded.TTL);
+    }
+
+    [Theory]
+    [MemberData(nameof(Providers))]
+    public async Task Weight_ShouldSurviveRoundTrip(string provider)
+    {
+        var repo = Create(provider);
+        var original = Rec("weighted.local", DnsRecordType.A, "1.1.1.1", weight: 9);
+
+        await repo.AddAsync(original);
+        var loaded = (await repo.LoadAllAsync()).Single();
+
+        Assert.Equal(9, loaded.Weight);
     }
 
     [Theory]
@@ -144,6 +159,44 @@ public sealed class DnsRecordRepositoryTests : IDisposable
         Assert.Equal(
             batch.Select(r => r.Domain).OrderBy(d => d),
             loaded.Select(r => r.Domain).OrderBy(d => d));
+    }
+
+    [Theory]
+    [MemberData(nameof(Providers))]
+    public async Task SaveAll_ShouldPersistMultipleValues_ForSameDomainAndType(string provider)
+    {
+        var repo = Create(provider);
+
+        DnsRecord[] batch =
+        [
+            Rec("multi.local", DnsRecordType.A, "1.1.1.1"),
+            Rec("multi.local", DnsRecordType.A, "1.1.1.2")
+        ];
+
+        await repo.SaveAllAsync(batch);
+        var loaded = (await repo.LoadAllAsync()).ToList();
+
+        Assert.Equal(2, loaded.Count);
+        Assert.Equal(
+            new[] { "1.1.1.1", "1.1.1.2" },
+            loaded.Select(r => r.Value).OrderBy(v => v));
+    }
+
+    [Theory]
+    [MemberData(nameof(Providers))]
+    public async Task AddAsync_ShouldPreserveOtherValues_ForSameDomainAndType(string provider)
+    {
+        var repo = Create(provider);
+
+        await repo.AddAsync(Rec("multi.local", DnsRecordType.A, "1.1.1.1"));
+        await repo.AddAsync(Rec("multi.local", DnsRecordType.A, "1.1.1.2"));
+
+        var loaded = (await repo.LoadAllAsync()).ToList();
+
+        Assert.Equal(2, loaded.Count);
+        Assert.Equal(
+            new[] { "1.1.1.1", "1.1.1.2" },
+            loaded.Select(r => r.Value).OrderBy(v => v));
     }
 
     [Theory]
@@ -217,6 +270,40 @@ public sealed class DnsRecordRepositoryTests : IDisposable
         await repo.ClearAsync();
 
         Assert.Empty(await repo.LoadAllAsync());
+    }
+
+    [Fact]
+    public async Task SqliteRepository_ShouldMigrateLegacyMultiValueSchema_WithoutWeightColumn()
+    {
+        var path = Path.Combine(_dir, "legacy-multi-value.db");
+
+        using (var connection = new SqliteConnection($"Data Source={path}"))
+        {
+            connection.Open();
+            using var command = new SqliteCommand(@"
+                CREATE TABLE DnsRecords (
+                    Domain TEXT NOT NULL,
+                    Type TEXT NOT NULL,
+                    Value TEXT NOT NULL,
+                    TTL INTEGER NOT NULL,
+                    PRIMARY KEY (Domain, Type, Value, TTL)
+                );
+
+                INSERT INTO DnsRecords (Domain, Type, Value, TTL)
+                VALUES ('multi.local', 'A', '1.1.1.1', 60),
+                       ('multi.local', 'A', '1.1.1.2', 90);", connection);
+            command.ExecuteNonQuery();
+        }
+
+        var repo = new SqliteRepository(path);
+        var loaded = (await repo.LoadAllAsync()).ToList();
+
+        loaded.Should().HaveCount(2);
+        loaded.Should().OnlyContain(r => r.Weight == 1);
+        Assert.Contains("1.1.1.1", loaded.Select(r => r.Value));
+        Assert.Contains("1.1.1.2", loaded.Select(r => r.Value));
+        Assert.Contains(60, loaded.Select(r => r.TTL));
+        Assert.Contains(90, loaded.Select(r => r.TTL));
     }
 
     [Theory]

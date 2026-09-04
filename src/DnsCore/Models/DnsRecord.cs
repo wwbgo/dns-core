@@ -13,6 +13,11 @@ public sealed record DnsRecord
     public int TTL { get; init; } = 3600;
 
     /// <summary>
+    /// 多 A/AAAA 记录负载均衡权重，1 表示默认权重。
+    /// </summary>
+    public int Weight { get; init; } = 1;
+
+    /// <summary>
     /// 是否为泛域名记录（owner name 以 "*." 开头）
     /// </summary>
     public bool IsWildcard => Domain.StartsWith("*.", StringComparison.Ordinal);

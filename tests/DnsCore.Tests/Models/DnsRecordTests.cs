@@ -42,6 +42,33 @@ public class DnsRecordTests
     }
 
     [Fact]
+    public void DnsRecord_ShouldDefaultWeightToOne()
+    {
+        var record = new DnsRecord
+        {
+            Domain = "example.com",
+            Type = DnsRecordType.A,
+            Value = "192.168.1.1"
+        };
+
+        record.Weight.Should().Be(1);
+    }
+
+    [Fact]
+    public void DnsRecord_ShouldStoreWeight()
+    {
+        var record = new DnsRecord
+        {
+            Domain = "example.com",
+            Type = DnsRecordType.A,
+            Value = "192.168.1.1",
+            Weight = 8
+        };
+
+        record.Weight.Should().Be(8);
+    }
+
+    [Fact]
     public void ToString_ShouldReturnFormattedString()
     {
         // Arrange

@@ -23,6 +23,7 @@ public sealed class DnsServer(
     private UdpClient? _udpServer;
     private TcpListener? _tcpServer;
     private CancellationTokenSource? _cts;
+    private int _roundRobinCounter;
 
     private readonly NetworkAcl _clientAcl = new(
         options.Security.EnableClientRestriction ? options.Security.AllowedClientNetworks : null);
@@ -502,7 +503,8 @@ public sealed class DnsServer(
                 logger.LogDebug("以自定义记录应答({Protocol}): {Domain} {Type}",
                     protocol, Sanitize(question.Name), question.Type);
 
-                return BuildResponse(query, customAnswers, DnsResponseCode.NoError,
+                var orderedAnswers = OrderForRoundRobin(customAnswers);
+                return BuildResponse(query, orderedAnswers, DnsResponseCode.NoError,
                     isAuthoritative: true, maxResponseSize);
             }
 
@@ -564,6 +566,22 @@ public sealed class DnsServer(
         {
             latencyStatistics.RecordLatency(Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
         }
+    }
+
+    /// <summary>
+    /// 对本地多 A/AAAA 记录做轮询排序。每次查询只轮换纯 IP 记录组，
+    /// 不改动 ANY 查询或其它记录类型。
+    /// </summary>
+    private List<DnsRecord> OrderForRoundRobin(List<DnsRecord> answers)
+    {
+        if (answers.Count <= 1 || answers[0].Type is not (DnsRecordType.A or DnsRecordType.AAAA))
+            return answers;
+
+        if (answers.Any(r => r.Type != answers[0].Type))
+            return answers;
+
+        var offset = Interlocked.Increment(ref _roundRobinCounter);
+        return DnsRecordOrderer.OrderForQuery(answers, offset);
     }
 
     private byte[] BuildResponse(

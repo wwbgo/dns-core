@@ -141,9 +141,14 @@ dnsApi.MapPost("/records", async (DnsRecord record, CustomRecordStore store) =>
 })
 .WithName("AddRecord");
 
-// 更新记录（先删后加，整组替换）
+// 更新记录。带 value 时只替换匹配该值的单条记录；
+// 不带 value 时保持旧行为：整组替换该域名+类型下的记录。
 dnsApi.MapPut("/records/{domain}/{type}", async (
-    string domain, string type, DnsRecord record, CustomRecordStore store) =>
+    string domain,
+    string type,
+    string? value,
+    DnsRecord record,
+    CustomRecordStore store) =>
 {
     if (!Enum.TryParse<DnsRecordType>(type, ignoreCase: true, out var recordType))
         return Results.BadRequest(new { error = "无效的记录类型" });
@@ -151,7 +156,11 @@ dnsApi.MapPut("/records/{domain}/{type}", async (
     if (!TryValidateRecord(record, out var error))
         return Results.BadRequest(new { error });
 
-    await store.RemoveRecordAsync(domain, recordType);
+    if (string.IsNullOrWhiteSpace(value))
+        await store.RemoveRecordAsync(domain, recordType);
+    else
+        await store.RemoveRecordAsync(domain, recordType, value);
+
     await store.AddRecordAsync(record);
     return Results.Ok(record);
 })
@@ -168,13 +177,21 @@ dnsApi.MapGet("/records/{domain}/{type}", (string domain, string type, CustomRec
 })
 .WithName("QueryRecord");
 
-// 删除记录
-dnsApi.MapDelete("/records/{domain}/{type}", async (string domain, string type, CustomRecordStore store) =>
+// 删除记录。不带 value 时删除该域名+类型下的整组记录；
+// 带 value 时只删除同域名同类型下匹配该值的单条记录。
+dnsApi.MapDelete("/records/{domain}/{type}", async (
+    string domain,
+    string type,
+    string? value,
+    CustomRecordStore store) =>
 {
     if (!Enum.TryParse<DnsRecordType>(type, ignoreCase: true, out var recordType))
         return Results.BadRequest(new { error = "无效的记录类型" });
 
-    var removed = await store.RemoveRecordAsync(domain, recordType);
+    var removed = string.IsNullOrWhiteSpace(value)
+        ? await store.RemoveRecordAsync(domain, recordType)
+        : await store.RemoveRecordAsync(domain, recordType, value);
+
     return removed ? Results.NoContent() : Results.NotFound();
 })
 .WithName("DeleteRecord");
@@ -290,6 +307,12 @@ static bool TryValidateRecord(DnsRecord? record, out string error)
     if (record.TTL <= 0 || record.TTL > int.MaxValue / 2)
     {
         error = "TTL 必须大于 0 且不超过 1073741823";
+        return false;
+    }
+
+    if (record.Weight is < 1 or > 1000)
+    {
+        error = "Weight 必须在 1 到 1000 之间";
         return false;
     }
 

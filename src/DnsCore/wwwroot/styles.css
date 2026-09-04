@@ -271,6 +271,14 @@ main {
     gap: var(--sp-5);
 }
 
+.view {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-5);
+}
+
+.view[hidden] { display: none; }
+
 /* --- 顶栏 ---------------------------------------------------------------- */
 .topbar {
     display: flex;
@@ -315,6 +323,77 @@ main {
     align-items: center;
     gap: var(--sp-2);
     flex-wrap: wrap;
+}
+
+/* --- 顶部主导航 ---------------------------------------------------------- */
+.main-nav {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-full);
+}
+
+.nav-item {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 0 var(--sp-3);
+    border: 0;
+    border-radius: var(--r-full);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: .86rem;
+    font-weight: 650;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.nav-item svg {
+    width: 16px;
+    height: 16px;
+    flex: none;
+}
+
+.nav-item:hover { color: var(--text); background: var(--surface-3); }
+
+.nav-item.is-active {
+    background: var(--brand-600);
+    color: #fff;
+}
+
+.nav-item.is-active:hover { background: var(--brand-600); color: #fff; }
+
+.nav-item__badge {
+    display: inline-grid;
+    place-items: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 5px;
+    border-radius: var(--r-full);
+    background: rgba(255, 255, 255, .18);
+    color: inherit;
+    font-size: .72rem;
+    font-weight: 750;
+    line-height: 1;
+}
+
+.nav-item:not(.is-active) .nav-item__badge {
+    background: var(--surface-3);
+    color: var(--text-muted);
+}
+
+.nav-item__dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--warn-fg, #d97706);
+    box-shadow: 0 0 0 3px var(--warn-bg, #fef3c7);
 }
 
 /* 顶栏服务状态：点 + 文字的胶囊。
@@ -1371,7 +1450,7 @@ tbody tr:hover { background: var(--surface-2); }
 
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
-.col-actions { width: 1%; white-space: nowrap; }
+.col-actions { width: 96px; min-width: 96px; white-space: nowrap; }
 
 td.col-actions { text-align: right; }
 
@@ -1433,6 +1512,8 @@ td.col-actions { text-align: right; }
     word-break: break-all;
 }
 
+.rec-weight { color: var(--text-muted); font-size: .85rem; }
+
 .rec-ttl { color: var(--text-muted); font-size: .85rem; }
 
 /* 类型标签：统一用低饱和底色 + 深色文字，深色主题下自动反转 */
@@ -1470,9 +1551,18 @@ td.col-actions { text-align: right; }
 :root[data-theme='dark'] .tag--CAA   { background: #2c1524; color: #ef92c0; border-color: #55274170; }
 :root[data-theme='dark'] .tag--SOA   { background: #26231a; color: #cfc196; border-color: #443e2c; }
 
-/* 行内删除按钮：默认低调，行 hover 时才提升可见度 */
+/* 行内编辑/删除按钮：默认低调，行 hover 时才提升可见度 */
+td.col-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+}
+
+.row-edit,
 .row-del {
     display: inline-flex;
+    flex: 0 0 30px;
     align-items: center;
     justify-content: center;
     width: 30px;
@@ -1486,9 +1576,15 @@ td.col-actions { text-align: right; }
     transition: all var(--dur) var(--ease);
 }
 
+tbody tr:hover .row-edit { color: var(--brand-600); border-color: currentColor; background: var(--surface-3); }
+
+.row-edit:hover { color: #fff !important; background: var(--brand-600) !important; border-color: transparent !important; }
+
 tbody tr:hover .row-del { color: var(--err-fg); border-color: var(--err-line); background: var(--err-bg); }
 
 .row-del:hover { color: #fff !important; background: #c8352c !important; border-color: transparent !important; }
+
+:root[data-theme='dark'] .row-edit:hover { color: #0c111b !important; background: var(--brand-400, #7c9fff) !important; }
 
 :root[data-theme='dark'] .row-del:hover { color: #1a0f10 !important; background: var(--err-fg) !important; }
 
@@ -1593,6 +1689,15 @@ tbody tr:hover .row-del { color: var(--err-fg); border-color: var(--err-line); b
 @media (max-width: 900px) {
     .form-grid { grid-template-columns: repeat(2, 1fr); }
     .field, .field--wide { grid-column: span 2; }
+
+    .topbar__actions { order: 2; }
+    .main-nav {
+        order: 3;
+        width: 100%;
+        overflow-x: auto;
+    }
+
+    .nav-item { flex: 1 0 auto; }
 }
 
 @media (max-width: 640px) {
@@ -1607,6 +1712,8 @@ tbody tr:hover .row-del { color: var(--err-fg); border-color: var(--err-line); b
     .topbar { padding: var(--sp-3); }
 
     .topbar__actions { width: 100%; justify-content: flex-end; }
+
+    .nav-item { padding: 0 var(--sp-2); }
 
     .form-grid { grid-template-columns: 1fr; }
 

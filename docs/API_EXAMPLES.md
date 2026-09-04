@@ -50,13 +50,15 @@ curl http://localhost:5000/api/dns/records
     "domain": "example.local",
     "type": "A",
     "value": "192.168.1.100",
-    "ttl": 3600
+    "ttl": 3600,
+    "weight": 1
   },
   {
     "domain": "*.dev.local",
     "type": "A",
     "value": "10.0.0.1",
-    "ttl": 300
+    "ttl": 300,
+    "weight": 3
   }
 ]
 ```
@@ -607,7 +609,8 @@ class DnsApiClient {
 | 获取所有记录 | GET | `/api/dns/records` |
 | 查询记录 | GET | `/api/dns/records/{domain}/{type}` |
 | 添加记录 | POST | `/api/dns/records` |
-| 删除记录 | DELETE | `/api/dns/records/{domain}/{type}` |
+| 更新记录 | PUT | `/api/dns/records/{domain}/{type}`；`?value=` 可指定替换单条 |
+| 删除记录 | DELETE | `/api/dns/records/{domain}/{type}`；`?value=` 可指定删除单条 |
 | 清空记录 | DELETE | `/api/dns/records` |
 
 ### 相关文档
