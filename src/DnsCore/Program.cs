@@ -70,12 +70,16 @@ builder.Services.AddSingleton<CustomRecordStore>();
 builder.Services.AddSingleton(sp => new HostsSourceStore(
     sp.GetRequiredService<ILogger<HostsSourceStore>>(),
     "data/hosts-sources.json"));
+builder.Services.AddSingleton(sp => new HostsSourceRecordStore(
+    sp.GetRequiredService<ILogger<HostsSourceRecordStore>>(),
+    "data/hosts-source-records.json"));
 var allowLoopbackHostsImport = builder.Configuration.GetValue<bool?>("HostsImport:AllowLoopback") ?? false;
 builder.Services.AddSingleton(sp => new HostsImportService(
     sp.GetRequiredService<ILogger<HostsImportService>>(),
     sp.GetRequiredService<CustomRecordStore>(),
     sp.GetRequiredService<IHttpClientFactory>(),
-    allowLoopbackHostsImport));
+    allowLoopbackHostsImport,
+    sp.GetRequiredService<HostsSourceRecordStore>()));
 builder.Services.AddHostedService<HostsSyncService>();
 builder.Services.AddSingleton<DnsCache>();
 builder.Services.AddSingleton<UpstreamDnsResolver>();
@@ -106,6 +110,9 @@ await upstreamSettingsStore.LoadAsync();
 
 var hostsSourceStore = app.Services.GetRequiredService<HostsSourceStore>();
 await hostsSourceStore.LoadAsync();
+
+var hostsSourceRecordStore = app.Services.GetRequiredService<HostsSourceRecordStore>();
+await hostsSourceRecordStore.LoadAsync();
 
 if (app.Environment.IsDevelopment())
 {
@@ -140,8 +147,43 @@ app.MapGet("/health", (DnsServer server, CustomRecordStore store) =>
 
 var dnsApi = app.MapGroup("/api/dns").WithTags("DNS Management");
 
-// 获取全部自定义记录
-dnsApi.MapGet("/records", (CustomRecordStore store) => Results.Ok(store.GetAllRecords()))
+// 获取全部自定义记录，并附带 hosts URL 来源信息
+dnsApi.MapGet("/records", async (
+    CustomRecordStore store,
+    HostsSourceRecordStore ownershipStore,
+    HostsSourceStore sourceStore) =>
+{
+    var sources = await sourceStore.GetAllAsync();
+    var sourceNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    foreach (var source in sources)
+        sourceNames[source.Id] = source.Name;
+
+    var dnsRecords = store.GetAllRecords().ToList();
+    var ownersByRecord = await ownershipStore.GetSourceIdsByRecordAsync(dnsRecords);
+    var records = new List<object>();
+
+    foreach (var record in dnsRecords)
+    {
+        var key = HostsSourceRecordStore.GetRecordKey(record.Domain, record.Type, record.Value);
+        var sourceIds = ownersByRecord.TryGetValue(key, out var owners) ? owners : [];
+        var labels = sourceIds
+            .Select(id => ResolveHostsSourceLabel(id, sourceNames))
+            .ToArray();
+
+        records.Add(new
+        {
+            record.Domain,
+            record.Type,
+            record.Value,
+            record.TTL,
+            record.Weight,
+            Source = labels.Length > 0 ? string.Join(", ", labels) : "手动添加"
+        });
+    }
+
+    return Results.Ok(records);
+})
     .WithName("GetAllRecords");
 
 // 添加自定义记录
@@ -233,7 +275,9 @@ hostsApi.MapPost("/sources", async (HostsSourceRequest request, HostsSourceStore
             request.Name,
             request.Url,
             request.SyncIntervalMinutes,
-            request.Ttl);
+            request.Ttl,
+            request.Paused,
+            request.Remark);
         return Results.Created($"/api/hosts/sources/{source.Id}", source);
     }
     catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
@@ -242,6 +286,62 @@ hostsApi.MapPost("/sources", async (HostsSourceRequest request, HostsSourceStore
     }
 })
 .WithName("AddHostsSource");
+
+hostsApi.MapPut("/sources/{id}", async (
+    string id,
+    HostsSourceRequest request,
+    HostsSourceStore store) =>
+{
+    try
+    {
+        var source = await store.UpdateAsync(
+            id,
+            request.Name,
+            request.Url,
+            request.SyncIntervalMinutes,
+            request.Ttl,
+            request.Remark);
+
+        return source is null ? Results.NotFound() : Results.Ok(source);
+    }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+})
+.WithName("UpdateHostsSource");
+
+hostsApi.MapPatch("/sources/{id}", async (
+    string id,
+    HostsSourcePauseRequest request,
+    HostsSourceStore store) =>
+{
+    var updated = await store.SetPausedAsync(id, request.Paused);
+    return updated ? Results.NoContent() : Results.NotFound();
+})
+.WithName("PauseHostsSource");
+
+hostsApi.MapPost("/sources/{id}/import", async (
+    string id,
+    HostsSourceStore sourceStore,
+    HostsImportService importer) =>
+{
+    var source = await sourceStore.GetAsync(id);
+    if (source is null)
+        return Results.NotFound();
+
+    try
+    {
+        var result = await importer.ImportUrlForSourceAsync(source.Id, source.Url, source.Ttl);
+        await sourceStore.UpdateSyncStatusAsync(source.Id, DateTime.UtcNow, null);
+        return Results.Ok(result);
+    }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+    {
+        return Results.BadRequest(new { error = ex is TaskCanceledException ? "hosts URL 请求超时" : ex.Message });
+    }
+})
+.WithName("ImportHostsSource");
 
 hostsApi.MapDelete("/sources/{id}", async (string id, HostsSourceStore store) =>
 {
@@ -411,12 +511,30 @@ static bool TryValidateRecord(DnsRecord? record, out string error)
     return true;
 }
 
+static string ResolveHostsSourceLabel(string sourceId, Dictionary<string, string> sourceNames)
+{
+    if (sourceId == HostsImportService.HostsFileImportSourceId)
+        return "hosts 文件导入";
+
+    if (sourceId == HostsImportService.HostsUrlImportSourceId)
+        return "hosts URL 导入";
+
+    return sourceNames.TryGetValue(sourceId, out var name) ? name : sourceId;
+}
+
 internal sealed record HostsSourceRequest
 {
     public required string Name { get; init; }
     public required string Url { get; init; }
     public int SyncIntervalMinutes { get; init; } = 60;
     public int Ttl { get; init; } = 3600;
+    public bool Paused { get; init; }
+    public string? Remark { get; init; }
+}
+
+internal sealed record HostsSourcePauseRequest
+{
+    public bool Paused { get; init; }
 }
 
 internal sealed record HostsImportRequest

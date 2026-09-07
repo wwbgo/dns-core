@@ -8,6 +8,8 @@ const THEME_STORAGE = 'dnscore.theme';
 
 let allRecords = [];
 let editingRecord = null;
+let editingSourceId = null;
+let selectedRecordKeys = new Set();
 
 // DOM 元素
 const $ = {
@@ -41,7 +43,10 @@ const $ = {
     searchInput: document.getElementById('searchInput'),
     searchClear: document.getElementById('searchClear'),
     exactSearch: document.getElementById('exactSearch'),
+    sourceFilter: document.getElementById('sourceFilter'),
     filterCount: document.getElementById('filterCount'),
+    selectAllRecords: document.getElementById('selectAllRecords'),
+    batchDeleteBtn: document.getElementById('batchDeleteBtn'),
     addRecordForm: document.getElementById('addRecordForm'),
     recordFormTitle: document.getElementById('recordFormTitle'),
     recordFormIcon: document.getElementById('recordFormIcon'),
@@ -96,6 +101,11 @@ const $ = {
     sourceUrlInput: document.getElementById('sourceUrlInput'),
     sourceSyncIntervalInput: document.getElementById('sourceSyncIntervalInput'),
     sourceTtlInput: document.getElementById('sourceTtlInput'),
+    sourceRemarkInput: document.getElementById('sourceRemarkInput'),
+    sourceSubmitBtn: document.getElementById('sourceSubmitBtn'),
+    sourceSubmitIcon: document.getElementById('sourceSubmitIcon'),
+    sourceSubmitText: document.getElementById('sourceSubmitText'),
+    sourceCancelEditBtn: document.getElementById('sourceCancelEditBtn'),
     hostsSourcesList: document.getElementById('hostsSourcesList')
 };
 
@@ -132,6 +142,9 @@ function bindEvents() {
     $.searchInput.addEventListener('input', handleSearch);
     $.searchClear.addEventListener('click', clearSearch);
     $.exactSearch.addEventListener('change', handleSearch);
+    $.sourceFilter.addEventListener('change', handleSearch);
+    $.selectAllRecords.addEventListener('change', handleSelectAllRecords);
+    $.batchDeleteBtn.addEventListener('click', handleBatchDelete);
     $.addRecordForm.addEventListener('submit', handleAddRecord);
     $.cancelEditBtn.addEventListener('click', resetRecordForm);
     $.clearAllBtn.addEventListener('click', handleClearAll);
@@ -160,6 +173,7 @@ function bindEvents() {
     $.importHostsTextBtn.addEventListener('click', handleHostsTextImport);
     $.importHostsUrlBtn.addEventListener('click', handleHostsUrlImport);
     $.hostsSourceForm.addEventListener('submit', handleAddHostsSource);
+    $.sourceCancelEditBtn.addEventListener('click', resetHostsSourceForm);
     $.hostsSourcesList.addEventListener('click', handleHostsSourceAction);
 
     document.querySelectorAll('.chip--add').forEach(btn => {
@@ -628,6 +642,10 @@ function renderHostsSources(sources) {
         const syncError = source.lastSyncError
             ? ` · ${escapeHtml(source.lastSyncError)}`
             : '';
+        const paused = Boolean(source.paused);
+        const remark = source.remark
+            ? `<span class="source-item__remark">${escapeHtml(source.remark)}</span>`
+            : '';
 
         return `
         <div class="source-item" role="listitem" data-id="${escapeHtml(source.id)}">
@@ -635,12 +653,28 @@ function renderHostsSources(sources) {
                 <span class="source-item__name">${escapeHtml(source.name)}</span>
                 <span class="source-item__url">${escapeHtml(source.url)}</span>
                 <span class="source-item__meta">
-                    每 ${Number(source.syncIntervalMinutes) || 60} 分钟同步 · TTL ${Number(source.ttl) || 3600}s · 最后同步: ${lastSync}${syncError}
+                    每 ${Number(source.syncIntervalMinutes) || 60} 分钟同步 · TTL ${Number(source.ttl) || 3600}s · ${paused ? '已暂停' : '同步中'} · 最后同步: ${lastSync}${syncError}
                 </span>
+                ${remark}
             </div>
             <div class="source-item__actions">
+                <button type="button" class="btn btn--sm btn--secondary" data-action="edit"
+                        data-id="${escapeHtml(source.id)}"
+                        data-name="${escapeHtml(source.name)}"
+                        data-url="${escapeHtml(source.url)}"
+                        data-interval="${escapeHtml(String(source.syncIntervalMinutes || 60))}"
+                        data-ttl="${escapeHtml(String(source.ttl || 3600))}"
+                        data-remark="${escapeHtml(source.remark || '')}">
+                    <svg aria-hidden="true"><use href="#i-edit"/></svg>
+                    <span>编辑</span>
+                </button>
+                <button type="button" class="btn btn--sm btn--secondary" data-action="pause"
+                        data-id="${escapeHtml(source.id)}" data-paused="${paused}">
+                    <svg aria-hidden="true"><use href="${paused ? '#i-play' : '#i-pause'}"/></svg>
+                    <span>${paused ? '恢复' : '暂停'}</span>
+                </button>
                 <button type="button" class="btn btn--sm btn--secondary" data-action="import"
-                        data-url="${escapeHtml(source.url)}" data-ttl="${escapeHtml(String(source.ttl || 3600))}">
+                        data-id="${escapeHtml(source.id)}">
                     <svg aria-hidden="true"><use href="#i-upload"/></svg>
                     <span>导入</span>
                 </button>
@@ -723,7 +757,8 @@ async function handleAddHostsSource(event) {
         name: $.sourceNameInput.value.trim(),
         url: $.sourceUrlInput.value.trim(),
         syncIntervalMinutes: parseInt($.sourceSyncIntervalInput.value, 10) || 60,
-        ttl: parseInt($.sourceTtlInput.value, 10) || 3600
+        ttl: parseInt($.sourceTtlInput.value, 10) || 3600,
+        remark: $.sourceRemarkInput.value.trim() || null
     };
 
     if (!payload.name || !payload.url) {
@@ -742,8 +777,14 @@ async function handleAddHostsSource(event) {
     }
 
     try {
-        const response = await apiFetch('/api/hosts/sources', {
-            method: 'POST',
+        const editing = editingSourceId;
+        const url = editing
+            ? `/api/hosts/sources/${encodeURIComponent(editing)}`
+            : '/api/hosts/sources';
+        const method = editing ? 'PUT' : 'POST';
+
+        const response = await apiFetch(url, {
+            method,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
@@ -753,24 +794,94 @@ async function handleAddHostsSource(event) {
             throw new Error(error.error || `HTTP ${response.status}`);
         }
 
-        showToast('hosts URL 来源已添加', 'success');
-        $.hostsSourceForm.reset();
+        showToast(editing ? 'hosts URL 来源已更新' : 'hosts URL 来源已添加', 'success');
+        resetHostsSourceForm();
         await loadHostsSources();
     } catch (error) {
         if (error.message !== 'Unauthorized') {
-            console.error('添加 hosts 来源失败:', error);
-            showToast(`添加失败: ${error.message}`, 'error');
+            console.error(editingSourceId ? '更新 hosts 来源失败:' : '添加 hosts 来源失败:', error);
+            showToast(editingSourceId ? '更新失败' : '添加失败', 'error');
         }
     }
+}
+
+function setHostsSourceFormMode(mode) {
+    const editing = mode === 'edit';
+
+    $.sourceSubmitText.textContent = editing ? '保存修改' : '添加来源';
+    $.sourceSubmitIcon.setAttribute('href', editing ? '#i-check' : '#i-plus');
+    $.sourceCancelEditBtn.hidden = !editing;
+}
+
+function resetHostsSourceForm() {
+    editingSourceId = null;
+    $.hostsSourceForm.reset();
+    $.sourceSyncIntervalInput.value = '60';
+    $.sourceTtlInput.value = '3600';
+    setHostsSourceFormMode('add');
 }
 
 async function handleHostsSourceAction(event) {
     const button = event.target.closest('button[data-action]');
     if (!button) return;
 
+    if (button.dataset.action === 'edit') {
+        editingSourceId = button.dataset.id;
+        $.sourceNameInput.value = button.dataset.name || '';
+        $.sourceUrlInput.value = button.dataset.url || '';
+        $.sourceSyncIntervalInput.value = button.dataset.interval || '60';
+        $.sourceTtlInput.value = button.dataset.ttl || '3600';
+        $.sourceRemarkInput.value = button.dataset.remark || '';
+        setHostsSourceFormMode('edit');
+        return;
+    }
+
+    if (button.dataset.action === 'pause') {
+        const id = button.dataset.id;
+        const paused = button.dataset.paused !== 'true';
+
+        try {
+            const response = await apiFetch(`/api/hosts/sources/${encodeURIComponent(id)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paused })
+            });
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            showToast(paused ? '来源已暂停同步' : '来源已恢复同步', 'success');
+            await loadHostsSources();
+        } catch (error) {
+            if (error.message !== 'Unauthorized') {
+                console.error('切换 hosts 来源同步状态失败:', error);
+                showToast('切换同步状态失败', 'error');
+            }
+        }
+        return;
+    }
+
     if (button.dataset.action === 'import') {
-        const ttl = Number(button.dataset.ttl) || hostsImportTtl();
-        await importHosts({ url: button.dataset.url, ttl });
+        const id = button.dataset.id;
+        if (!id) return;
+
+        try {
+            const response = await apiFetch(`/api/hosts/sources/${encodeURIComponent(id)}/import`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+
+            const result = await response.json();
+            showToast(`导入 ${result.imported} 条，跳过重复 ${result.skippedDuplicates} 条`, 'success');
+            await Promise.all([loadRecords(true), loadHostsSources()]);
+        } catch (error) {
+            if (error.message !== 'Unauthorized') {
+                console.error('导入 hosts 来源失败:', error);
+                showToast(`导入失败: ${error.message}`, 'error');
+            }
+        }
         return;
     }
 
@@ -1225,7 +1336,7 @@ async function handleSaveUpstream(e) {
 // --- 记录管理 -------------------------------------------------------------
 async function loadRecords(silent = false) {
     if (!silent) {
-        $.recordsBody.innerHTML = '<tr class="state-row"><td colspan="6"><span class="spinner"></span> 加载中…</td></tr>';
+        $.recordsBody.innerHTML = '<tr class="state-row"><td colspan="8"><span class="spinner"></span> 加载中…</td></tr>';
     }
 
     try {
@@ -1239,6 +1350,7 @@ async function loadRecords(silent = false) {
         allRecords = Array.isArray(records) ? records : [];
 
         $.recordCount.textContent = allRecords.length.toLocaleString();
+        updateSourceFilterOptions();
         applySearchFilter();
         updateNavIndicators();
 
@@ -1248,7 +1360,7 @@ async function loadRecords(silent = false) {
     } catch (error) {
         if (error.message !== 'Unauthorized') {
             console.error('加载记录失败:', error);
-            $.recordsBody.innerHTML = `<tr class="state-row state-row--error"><td colspan="6">加载失败: ${escapeHtml(error.message)}</td></tr>`;
+            $.recordsBody.innerHTML = `<tr class="state-row state-row--error"><td colspan="8">加载失败: ${escapeHtml(error.message)}</td></tr>`;
             showToast('加载记录失败', 'error');
         }
     }
@@ -1258,7 +1370,7 @@ function renderRecords(records) {
     if (records.length === 0) {
         $.recordsBody.innerHTML = `
             <tr class="state-row">
-                <td colspan="6">
+                <td colspan="8">
                     <div class="empty-state">
                         <svg><use href="#i-inbox"/></svg>
                         <strong>暂无记录</strong>
@@ -1266,6 +1378,7 @@ function renderRecords(records) {
                     </div>
                 </td>
             </tr>`;
+        updateSelectionUi();
         return;
     }
 
@@ -1275,14 +1388,19 @@ function renderRecords(records) {
             ? `<span class="wild">*.</span>${escapeHtml(rec.domain.slice(2))}`
             : escapeHtml(rec.domain);
 
+        const key = recordKey(rec);
+        const selected = selectedRecordKeys.has(key);
+
         return `
             <tr data-domain="${escapeHtml(rec.domain)}" data-type="${escapeHtml(rec.type)}" data-value="${escapeHtml(rec.value)}"
                 data-ttl="${escapeHtml(String(rec.ttl))}" data-weight="${escapeHtml(String(rec.weight ?? 1))}">
+                <td class="col-select"><input type="checkbox" class="row-select" data-key="${escapeHtml(key)}" ${selected ? 'checked' : ''} aria-label="选择记录"></td>
                 <td data-label="域名" class="rec-domain">${domainDisplay}</td>
                 <td data-label="类型"><span class="tag tag--${escapeHtml(rec.type)}">${escapeHtml(rec.type)}</span></td>
                 <td data-label="记录值" class="rec-value">
                     <div class="rec-value__text">${escapeHtml(rec.value)}</div>
                 </td>
+                <td data-label="来源">${escapeHtml(rec.source || '手动添加')}</td>
                 <td data-label="权重" class="rec-weight num">${rec.type === 'A' || rec.type === 'AAAA' ? rec.weight ?? 1 : ''}</td>
                 <td data-label="TTL" class="rec-ttl num">${rec.ttl.toLocaleString()}s</td>
                 <td class="col-actions">
@@ -1299,16 +1417,100 @@ function renderRecords(records) {
     }).join('');
 
     $.recordsBody.innerHTML = html;
+    updateSelectionUi();
 }
 
 function handleRecordAction(event) {
-    const button = event.target.closest('button');
-    if (!button || !$.recordsBody.contains(button)) return;
+    const control = event.target.closest('button, input.row-select');
+    if (!control || !$.recordsBody.contains(control)) return;
 
-    if (button.classList.contains('row-edit')) {
-        handleEditRecord(button);
-    } else if (button.classList.contains('row-del')) {
-        handleDeleteRecord(button);
+    if (control.classList.contains('row-edit')) {
+        handleEditRecord(control);
+    } else if (control.classList.contains('row-del')) {
+        handleDeleteRecord(control);
+    } else if (control.classList.contains('row-select')) {
+        handleRowSelect(control);
+    }
+}
+
+function recordKey(record) {
+    return JSON.stringify([record.domain, record.type, record.value]);
+}
+
+function recordKeyFromRow(row) {
+    return recordKey({
+        domain: row.dataset.domain,
+        type: row.dataset.type,
+        value: row.dataset.value
+    });
+}
+
+function handleRowSelect(checkbox) {
+    const row = checkbox.closest('tr');
+    if (!row) return;
+
+    const key = recordKeyFromRow(row);
+    if (checkbox.checked) selectedRecordKeys.add(key);
+    else selectedRecordKeys.delete(key);
+
+    updateSelectionUi();
+}
+
+function handleSelectAllRecords() {
+    const visible = [...$.recordsBody.querySelectorAll('.row-select')];
+
+    if ($.selectAllRecords.checked) {
+        visible.forEach(checkbox => {
+            checkbox.checked = true;
+            selectedRecordKeys.add(checkbox.dataset.key);
+        });
+    } else {
+        visible.forEach(checkbox => {
+            checkbox.checked = false;
+            selectedRecordKeys.delete(checkbox.dataset.key);
+        });
+    }
+
+    updateSelectionUi();
+}
+
+function updateSelectionUi() {
+    const visible = [...$.recordsBody.querySelectorAll('.row-select')];
+    const visibleSelected = visible.filter(checkbox => checkbox.checked).length;
+
+    $.selectAllRecords.checked = visible.length > 0 && visibleSelected === visible.length;
+    $.selectAllRecords.indeterminate = visibleSelected > 0 && visibleSelected < visible.length;
+    $.batchDeleteBtn.hidden = visibleSelected === 0;
+    $.batchDeleteBtn.querySelector('span').textContent = visibleSelected > 0
+        ? `删除所选 (${visibleSelected})`
+        : '删除所选';
+}
+
+async function handleBatchDelete() {
+    const selected = [...selectedRecordKeys];
+    if (selected.length === 0) return;
+
+    if (!confirm(`确定要删除选中的 ${selected.length} 条记录吗？`)) return;
+
+    try {
+        for (const key of selected) {
+            const [domain, type, value] = JSON.parse(key);
+            const response = await apiFetch(
+                `${API_BASE}/records/${encodeURIComponent(domain)}/${type}?value=${encodeURIComponent(value)}`,
+                { method: 'DELETE' }
+            );
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        }
+
+        selectedRecordKeys.clear();
+        showToast(`已删除 ${selected.length} 条记录`, 'success');
+        await loadRecords(true);
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            console.error('批量删除记录失败:', error);
+            showToast('批量删除失败', 'error');
+        }
     }
 }
 
@@ -1434,6 +1636,7 @@ async function handleDeleteRecord(button) {
             throw new Error(`HTTP ${response.status}`);
         }
 
+        selectedRecordKeys.delete(recordKeyFromRow(row));
         showToast(`已删除记录: ${recordLabel}`, 'success');
         await loadRecords();
     } catch (error) {
@@ -1458,6 +1661,7 @@ async function handleClearAll() {
             throw new Error(`HTTP ${response.status}`);
         }
 
+        selectedRecordKeys.clear();
         showToast('已清空全部记录', 'success');
         await loadRecords();
     } catch (error) {
@@ -1473,6 +1677,18 @@ function handleSearch() {
     applySearchFilter();
 }
 
+function updateSourceFilterOptions() {
+    const current = $.sourceFilter.value;
+    const sources = [...new Set(allRecords.map(rec => rec.source || '手动添加'))].sort();
+
+    $.sourceFilter.innerHTML = [
+        '<option value="">全部来源</option>',
+        ...sources.map(source => `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`)
+    ].join('');
+
+    $.sourceFilter.value = sources.includes(current) ? current : '';
+}
+
 function applySearchFilter() {
     const rawQuery = $.searchInput.value.trim();
     const query = rawQuery.toLowerCase();
@@ -1483,13 +1699,20 @@ function applySearchFilter() {
         ? '输入完整域名、类型或记录值'
         : '搜索域名、类型或记录值';
 
-    if (!rawQuery) {
+    const sourceFilter = $.sourceFilter.value;
+
+    if (!rawQuery && !sourceFilter) {
         renderRecords(allRecords);
         $.filterCount.textContent = '';
         return;
     }
 
     const filtered = allRecords.filter(rec => {
+        const source = rec.source || '手动添加';
+        if (sourceFilter && source !== sourceFilter) return false;
+
+        if (!rawQuery) return true;
+
         const weight = String(rec.weight ?? 1);
 
         if (exact) {

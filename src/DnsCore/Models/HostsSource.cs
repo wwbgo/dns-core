@@ -10,6 +10,8 @@ public sealed class HostsSource
     public required string Url { get; set; }
     public int SyncIntervalMinutes { get; set; } = 60;
     public int Ttl { get; set; } = 3600;
+    public string? Remark { get; set; }
+    public bool Paused { get; set; }
     public DateTime? LastSyncedAtUtc { get; set; }
     public string? LastSyncError { get; set; }
 }

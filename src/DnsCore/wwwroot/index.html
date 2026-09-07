@@ -45,6 +45,8 @@
         </symbol>
         <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
         <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+        <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7V5z"/></symbol>
         <symbol id="i-alert" viewBox="0 0 24 24">
             <path d="M12 3l9 16H3l9-16zM12 9v5"/><circle cx="12" cy="17" r=".6" fill="currentColor"/>
         </symbol>
@@ -383,6 +385,14 @@
                             <svg aria-hidden="true"><use href="#i-x"/></svg>
                         </button>
                     </div>
+                    <label class="source-filter select-wrap">
+                        <select id="sourceFilter" aria-label="来源过滤">
+                            <option value="">全部来源</option>
+                        </select>
+                        <svg class="select-wrap__arrow" aria-hidden="true" viewBox="0 0 24 24">
+                            <path d="M6 9l6 6 6-6"/>
+                        </svg>
+                    </label>
                     <label class="search-option">
                         <input type="checkbox" id="exactSearch">
                         <span>精确查询</span>
@@ -394,9 +404,13 @@
                         <caption class="sr-only">自定义 DNS 记录列表</caption>
                         <thead>
                             <tr>
+                                <th scope="col" class="col-select">
+                                    <input type="checkbox" id="selectAllRecords" aria-label="选择全部记录">
+                                </th>
                                 <th scope="col">域名</th>
                                 <th scope="col">类型</th>
                                 <th scope="col">记录值</th>
+                                <th scope="col">来源</th>
                                 <th scope="col" class="num">权重</th>
                                 <th scope="col" class="num">TTL</th>
                                 <th scope="col" class="col-actions">操作</th>
@@ -404,7 +418,7 @@
                         </thead>
                         <tbody id="recordsBody">
                             <tr class="state-row">
-                                <td colspan="6"><span class="spinner" aria-hidden="true"></span> 加载中…</td>
+                                <td colspan="8"><span class="spinner" aria-hidden="true"></span> 加载中…</td>
                             </tr>
                         </tbody>
                     </table>
@@ -413,6 +427,10 @@
                 <!-- 危险操作区：清空是不可恢复且极少使用的操作，
                      放在列表末尾而非表单主操作区，避免与"添加记录"并列被误点 -->
                 <div class="panel__footer">
+                    <button type="button" id="batchDeleteBtn" class="btn btn--sm btn--danger" hidden>
+                        <svg aria-hidden="true"><use href="#i-trash"/></svg>
+                        <span>删除所选</span>
+                    </button>
                     <button type="button" id="clearAllBtn" class="btn btn--sm btn--danger-ghost">
                         <svg aria-hidden="true"><use href="#i-trash"/></svg>
                         <span>清空所有记录</span>
@@ -525,10 +543,19 @@
                         <label for="sourceTtlInput">TTL <span class="field__unit">秒</span></label>
                         <input type="number" id="sourceTtlInput" value="3600" min="1" max="86400">
                     </div>
+                    <div class="field field--wide">
+                        <label for="sourceRemarkInput">备注</label>
+                        <textarea id="sourceRemarkInput" rows="2"
+                                  placeholder="可选，例如：团队内部 DNS 规则来源"></textarea>
+                    </div>
                     <div class="form-actions">
-                        <button type="submit" class="btn btn--primary">
-                            <svg aria-hidden="true"><use href="#i-plus"/></svg>
-                            <span>添加来源</span>
+                        <button type="submit" class="btn btn--primary" id="sourceSubmitBtn">
+                            <svg aria-hidden="true"><use id="sourceSubmitIcon" href="#i-plus"/></svg>
+                            <span id="sourceSubmitText">添加来源</span>
+                        </button>
+                        <button type="button" class="btn btn--secondary" id="sourceCancelEditBtn" hidden>
+                            <svg aria-hidden="true"><use href="#i-x"/></svg>
+                            <span>取消编辑</span>
                         </button>
                     </div>
                 </form>

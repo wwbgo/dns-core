@@ -89,3 +89,6 @@ data/*
 # src/DnsCore/data/ 下，而上面的 data/* 只作用于仓库根目录
 dns-records.json
 upstream-settings.json
+hosts-sources.json
+hosts-source-records.json
+src/DnsCore/data/

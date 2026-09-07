@@ -54,11 +54,26 @@ public sealed class HostsSourceStore(
         }
     }
 
+    public async Task<HostsSource?> GetAsync(string id)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            return _sources.FirstOrDefault(s => s.Id == id);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task<HostsSource> AddAsync(
         string name,
         string url,
         int syncIntervalMinutes,
-        int ttl)
+        int ttl,
+        bool paused = false,
+        string? remark = null)
     {
         Validate(name, url, syncIntervalMinutes, ttl);
 
@@ -77,7 +92,9 @@ public sealed class HostsSourceStore(
                 Name = name.Trim(),
                 Url = url.Trim(),
                 SyncIntervalMinutes = syncIntervalMinutes,
-                Ttl = ttl
+                Ttl = ttl,
+                Paused = paused,
+                Remark = string.IsNullOrWhiteSpace(remark) ? null : remark.Trim()
             };
 
             _sources.Add(source);
@@ -100,6 +117,64 @@ public sealed class HostsSourceStore(
                 await SaveAsync();
 
             return removed;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<HostsSource?> UpdateAsync(
+        string id,
+        string name,
+        string url,
+        int syncIntervalMinutes,
+        int ttl,
+        string? remark)
+    {
+        Validate(name, url, syncIntervalMinutes, ttl);
+
+        await _lock.WaitAsync();
+        try
+        {
+            var source = _sources.FirstOrDefault(s => s.Id == id);
+            if (source is null)
+                return null;
+
+            if (_sources.Any(s =>
+                    s.Id != id
+                    && string.Equals(s.Url, url, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException("该 URL 已存在");
+            }
+
+            source.Name = name.Trim();
+            source.Url = url.Trim();
+            source.SyncIntervalMinutes = syncIntervalMinutes;
+            source.Ttl = ttl;
+            source.Remark = string.IsNullOrWhiteSpace(remark) ? null : remark.Trim();
+
+            await SaveAsync();
+            return source;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<bool> SetPausedAsync(string id, bool paused)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var source = _sources.FirstOrDefault(s => s.Id == id);
+            if (source is null)
+                return false;
+
+            source.Paused = paused;
+            await SaveAsync();
+            return true;
         }
         finally
         {
@@ -144,6 +219,7 @@ public sealed class HostsSourceStore(
             source.Ttl = source.Ttl is <= 0 or > int.MaxValue / 2
                 ? 3600
                 : source.Ttl;
+            source.Remark = string.IsNullOrWhiteSpace(source.Remark) ? null : source.Remark.Trim();
         }
     }
 

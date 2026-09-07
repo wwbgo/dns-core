@@ -37,6 +37,9 @@ public sealed class HostsSyncService(
             {
                 token.ThrowIfCancellationRequested();
 
+                if (source.Paused)
+                    return;
+
                 if (source.LastSyncedAtUtc is { } lastSynced
                     && now - lastSynced < TimeSpan.FromMinutes(source.SyncIntervalMinutes))
                 {
@@ -45,7 +48,7 @@ public sealed class HostsSyncService(
 
                 try
                 {
-                    var result = await importService.ImportUrlAsync(source.Url, source.Ttl);
+                    var result = await importService.ImportUrlForSourceAsync(source.Id, source.Url, source.Ttl);
                     await sourceStore.UpdateSyncStatusAsync(source.Id, DateTime.UtcNow, null);
 
                     logger.LogInformation(
