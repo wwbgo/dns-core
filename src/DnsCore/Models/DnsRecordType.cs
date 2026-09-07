@@ -47,4 +47,11 @@ public static class DnsLimits
 
     /// <summary>单个查询允许的最大 question 数（正常查询恒为 1）</summary>
     public const int MaxQuestionCount = 4;
+
+    /// <summary>
+    /// 查询报文中 answer/authority/additional 三段记录数的合计上限。
+    /// 标准查询通常只有 0 或 1 条 additional（EDNS0），此上限用于防止
+    /// 畸形计数驱动解析器无谓循环。
+    /// </summary>
+    public const int MaxQueryResourceRecords = 16;
 }

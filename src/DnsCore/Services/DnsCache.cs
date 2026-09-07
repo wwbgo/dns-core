@@ -20,16 +20,18 @@ public sealed record DnsCacheResult
 /// </summary>
 public sealed class DnsCache
 {
-    private readonly Dictionary<string, LinkedListNode<CacheEntry>> _index;
-    private readonly LinkedList<CacheEntry> _lru = new();
-    private readonly Lock _gate = new();
+    private const int MaxShardCount = 16;
+    private static readonly CacheKeyComparer KeyComparer = new();
 
+    private readonly Shard[] _shards;
+    private readonly int _shardCount;
     private readonly int _maxEntries;
     private readonly TimeSpan _maxTtl;
     private readonly TimeSpan _minTtl;
     private readonly TimeSpan _negativeTtl;
     private readonly ILogger<DnsCache> _logger;
 
+    private long _sequence;
     private long _hits;
     private long _misses;
 
@@ -42,8 +44,13 @@ public sealed class DnsCache
         _maxTtl = TimeSpan.FromSeconds(Math.Max(1, options.MaxTtlSeconds));
         _minTtl = TimeSpan.FromSeconds(Math.Max(0, options.MinTtlSeconds));
         _negativeTtl = TimeSpan.FromSeconds(Math.Max(0, options.NegativeTtlSeconds));
-        _index = new Dictionary<string, LinkedListNode<CacheEntry>>(
-            Math.Min(_maxEntries, 1024), StringComparer.Ordinal);
+
+        // 小容量时保持单分片，确保 LRU 语义与旧实现一致；大容量时拆分锁。
+        _shardCount = Math.Clamp(_maxEntries, 1, MaxShardCount);
+        var initialShardCapacity = Math.Max(1, _maxEntries / _shardCount);
+        _shards = Enumerable.Range(0, _shardCount)
+            .Select(_ => new Shard(initialShardCapacity))
+            .ToArray();
     }
 
     /// <summary>
@@ -54,41 +61,49 @@ public sealed class DnsCache
     {
         var key = GetCacheKey(domain, type, classValue);
         var now = DateTime.UtcNow;
+        var shard = GetShard(key);
+        CacheEntry? entry;
 
-        lock (_gate)
+        lock (shard.Gate)
         {
-            if (!_index.TryGetValue(key, out var node))
+            if (!shard.Index.TryGetValue(key, out var node))
             {
                 Interlocked.Increment(ref _misses);
                 return null;
             }
 
-            var entry = node.Value;
+            entry = node.Value;
 
             if (entry.ExpiresAt <= now)
             {
-                _lru.Remove(node);
-                _index.Remove(key);
+                shard.Lru.Remove(node);
+                shard.Index.Remove(key);
                 Interlocked.Increment(ref _misses);
                 _logger.LogDebug("缓存过期: {Domain} {Type}", domain, type);
                 return null;
             }
 
             // LRU：命中后移到链表头
-            _lru.Remove(node);
-            _lru.AddFirst(node);
+            shard.Lru.Remove(node);
+            shard.Lru.AddFirst(node);
+            entry.Sequence = Interlocked.Increment(ref _sequence);
 
             Interlocked.Increment(ref _hits);
-
-            var remaining = (int)Math.Max(1, (entry.ExpiresAt - now).TotalSeconds);
-
-            // 返回副本，避免调用方修改污染缓存内容
-            return new DnsCacheResult
-            {
-                Records = [.. entry.Records.Select(r => r with { TTL = remaining })],
-                ResponseCode = entry.ResponseCode
-            };
         }
+
+        var remaining = (int)Math.Max(1, (entry.ExpiresAt - now).TotalSeconds);
+
+        // 返回副本，避免调用方修改污染缓存内容。
+        // 锁内只维护 LRU 状态，记录复制放到锁外，缩短缓存读锁持有时间。
+        var records = new List<DnsRecord>(entry.Records.Count);
+        foreach (var record in entry.Records)
+            records.Add(record with { TTL = remaining });
+
+        return new DnsCacheResult
+        {
+            Records = records,
+            ResponseCode = entry.ResponseCode
+        };
     }
 
     /// <summary>写入正向缓存</summary>
@@ -107,10 +122,11 @@ public sealed class DnsCache
         // 上游返回 TTL<=0 时会算出负 TimeSpan，条目写入即过期。
         var smallest = records.Min(r => r.TTL);
         var ttl = TimeSpan.FromSeconds(Math.Clamp(smallest, _minTtl.TotalSeconds, _maxTtl.TotalSeconds));
+        var key = GetCacheKey(domain, type, classValue);
 
-        Store(GetCacheKey(domain, type, classValue), new CacheEntry
+        Store(key, new CacheEntry
         {
-            Key = GetCacheKey(domain, type, classValue),
+            Key = key,
             Records = [.. records],
             ResponseCode = DnsResponseCode.NoError,
             ExpiresAt = DateTime.UtcNow.Add(ttl)
@@ -142,71 +158,152 @@ public sealed class DnsCache
             domain, type, code, (int)_negativeTtl.TotalSeconds);
     }
 
-    private void Store(string key, CacheEntry entry)
+    private void Store(CacheKey key, CacheEntry entry)
     {
-        lock (_gate)
+        var shard = GetShard(key);
+
+        lock (shard.Gate)
         {
-            if (_index.TryGetValue(key, out var existing))
+            if (shard.Index.TryGetValue(key, out var existing))
             {
-                _lru.Remove(existing);
-                _index.Remove(key);
+                shard.Lru.Remove(existing);
+                shard.Index.Remove(key);
             }
 
-            // O(1) 淘汰：直接摘链表尾
-            while (_index.Count >= _maxEntries && _lru.Last is not null)
+            entry.Sequence = Interlocked.Increment(ref _sequence);
+            shard.Index[key] = shard.Lru.AddFirst(entry);
+        }
+
+        EvictOverflow();
+    }
+
+    private void EvictOverflow()
+    {
+        var attempts = 0;
+
+        while (CountEntries() > _maxEntries)
+        {
+            if (TryEvictOldest())
             {
-                var oldest = _lru.Last;
-                _lru.RemoveLast();
-                _index.Remove(oldest.Value.Key);
-                _logger.LogDebug("淘汰最旧缓存条目: {Key}", oldest.Value.Key);
+                attempts = 0;
+                continue;
             }
 
-            _index[key] = _lru.AddFirst(entry);
+            if (++attempts > MaxShardCount * 2)
+                break;
+
+            Thread.Yield();
+        }
+    }
+
+    private int CountEntries()
+    {
+        var count = 0;
+
+        foreach (var shard in _shards)
+        {
+            lock (shard.Gate)
+                count += shard.Index.Count;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// 找出所有分片中最旧的条目并淘汰。
+    /// 扫描与淘汰分别加锁，避免同时持有多个分片锁造成死锁。
+    /// </summary>
+    private bool TryEvictOldest()
+    {
+        var bestShard = -1;
+        var bestSequence = long.MaxValue;
+        CacheEntry? bestEntry = null;
+
+        for (var i = 0; i < _shards.Length; i++)
+        {
+            lock (_shards[i].Gate)
+            {
+                var last = _shards[i].Lru.Last;
+                if (last is not null && last.Value.Sequence < bestSequence)
+                {
+                    bestSequence = last.Value.Sequence;
+                    bestShard = i;
+                    bestEntry = last.Value;
+                }
+            }
+        }
+
+        if (bestShard < 0 || bestEntry is null)
+            return false;
+
+        var shard = _shards[bestShard];
+        lock (shard.Gate)
+        {
+            var last = shard.Lru.Last;
+            if (last is null || !ReferenceEquals(last.Value, bestEntry))
+                return false;
+
+            shard.Lru.RemoveLast();
+            shard.Index.Remove(last.Value.Key);
+            _logger.LogDebug("淘汰最旧缓存条目: {Domain} {Type}",
+                last.Value.Key.Domain, last.Value.Key.Type);
+            return true;
         }
     }
 
     /// <summary>清空缓存</summary>
     public void Clear()
     {
-        lock (_gate)
+        var count = 0;
+
+        foreach (var shard in _shards)
         {
-            var count = _index.Count;
-            _index.Clear();
-            _lru.Clear();
-            _logger.LogInformation("缓存已清空，移除 {Count} 条", count);
+            lock (shard.Gate)
+            {
+                count += shard.Index.Count;
+                shard.Index.Clear();
+                shard.Lru.Clear();
+            }
         }
+
+        _logger.LogInformation("缓存已清空，移除 {Count} 条", count);
     }
 
     /// <summary>缓存统计</summary>
     public DnsCacheStats GetStats()
     {
         var now = DateTime.UtcNow;
+        var total = 0;
+        var active = 0;
+        var negative = 0;
 
-        lock (_gate)
+        foreach (var shard in _shards)
         {
-            var active = 0;
-            var negative = 0;
-
-            foreach (var entry in _lru)
+            lock (shard.Gate)
             {
-                if (entry.ExpiresAt <= now)
-                    continue;
+                total += shard.Index.Count;
 
-                active++;
-                if (entry.Records.Count == 0)
-                    negative++;
+                foreach (var entry in shard.Lru)
+                {
+                    if (entry.ExpiresAt <= now)
+                        continue;
+
+                    active++;
+                    if (entry.Records.Count == 0)
+                        negative++;
+                }
             }
-
-            return new DnsCacheStats
-            {
-                TotalEntries = _index.Count,
-                ActiveEntries = active,
-                NegativeEntries = negative,
-                MaxEntries = _maxEntries,
-                Hits = Interlocked.Read(ref _hits),
-                Misses = Interlocked.Read(ref _misses)
-            };
         }
+
+        return new DnsCacheStats
+        {
+            TotalEntries = total,
+            ActiveEntries = active,
+            NegativeEntries = negative,
+            MaxEntries = _maxEntries,
+            Hits = Interlocked.Read(ref _hits),
+            Misses = Interlocked.Read(ref _misses)
+        };
     }
 
     /// <summary>清理过期条目</summary>
@@ -215,21 +312,24 @@ public sealed class DnsCache
         var now = DateTime.UtcNow;
         var removed = 0;
 
-        lock (_gate)
+        foreach (var shard in _shards)
         {
-            var node = _lru.First;
-            while (node is not null)
+            lock (shard.Gate)
             {
-                var next = node.Next;
-
-                if (node.Value.ExpiresAt <= now)
+                var node = shard.Lru.First;
+                while (node is not null)
                 {
-                    _lru.Remove(node);
-                    _index.Remove(node.Value.Key);
-                    removed++;
-                }
+                    var next = node.Next;
 
-                node = next;
+                    if (node.Value.ExpiresAt <= now)
+                    {
+                        shard.Lru.Remove(node);
+                        shard.Index.Remove(node.Value.Key);
+                        removed++;
+                    }
+
+                    node = next;
+                }
             }
         }
 
@@ -237,15 +337,57 @@ public sealed class DnsCache
             _logger.LogDebug("已清理 {Count} 条过期缓存", removed);
     }
 
-    private static string GetCacheKey(string domain, DnsRecordType type, ushort classValue)
-        => $"{domain.TrimEnd('.').ToLowerInvariant()}:{(ushort)type}:{classValue}";
+    private Shard GetShard(CacheKey key)
+    {
+        var hash = (uint)KeyComparer.GetHashCode(key);
+        return _shards[(int)(hash % (uint)_shardCount)];
+    }
+
+    private static CacheKey GetCacheKey(string domain, DnsRecordType type, ushort classValue)
+        => new(domain, type, classValue);
 
     private sealed class CacheEntry
     {
-        public required string Key { get; init; }
+        public required CacheKey Key { get; init; }
         public required List<DnsRecord> Records { get; init; }
         public required DnsResponseCode ResponseCode { get; init; }
         public required DateTime ExpiresAt { get; init; }
+        public long Sequence { get; set; }
+    }
+
+    private sealed class Shard(int initialCapacity)
+    {
+        public Lock Gate { get; } = new();
+        public Dictionary<CacheKey, LinkedListNode<CacheEntry>> Index { get; } =
+            new(initialCapacity, KeyComparer);
+        public LinkedList<CacheEntry> Lru { get; } = new();
+    }
+
+    private readonly record struct CacheKey(
+        string Domain,
+        DnsRecordType Type,
+        ushort Class);
+
+    private sealed class CacheKeyComparer : IEqualityComparer<CacheKey>
+    {
+        public bool Equals(CacheKey x, CacheKey y)
+            => x.Type == y.Type
+               && x.Class == y.Class
+               && x.Domain.AsSpan().TrimEnd('.').Equals(
+                   y.Domain.AsSpan().TrimEnd('.'), StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode(CacheKey key)
+        {
+            var hash = new HashCode();
+            var domain = key.Domain.AsSpan().TrimEnd('.');
+
+            foreach (var c in domain)
+                hash.Add(char.ToLowerInvariant(c));
+
+            hash.Add((ushort)key.Type);
+            hash.Add(key.Class);
+            return hash.ToHashCode();
+        }
     }
 }
 

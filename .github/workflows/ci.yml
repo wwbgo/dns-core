@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, test, and smoke load
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Restore
+        run: dotnet restore DnsCore.sln
+
+      - name: Check frontend syntax
+        run: node --check src/DnsCore/wwwroot/app.js
+
+      - name: Build Release
+        run: dotnet build DnsCore.sln -c Release --no-restore
+
+      - name: Run tests
+        run: dotnet test DnsCore.sln -c Release --no-restore --verbosity minimal
+
+      - name: UDP load smoke test
+        run: dotnet run -c Release --project benchmarks/DnsCore.LoadTest/DnsCore.LoadTest.csproj --no-restore -- 4
+
+  benchmark:
+    name: Microbenchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore DnsCore.sln
+
+      - name: Run DNS hot path benchmarks
+        run: dotnet run -c Release --project benchmarks/DnsCore.Benchmarks/DnsCore.Benchmarks.csproj --no-restore -- --job short --filter "*DnsHotPathBenchmarks*"

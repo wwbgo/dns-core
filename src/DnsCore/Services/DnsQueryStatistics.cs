@@ -20,18 +20,11 @@ public sealed class DnsQueryStatistics
     // 分钟级槽覆盖 1 天。不用秒级槽回答"最近一天"：那要遍历 86400 个槽，
     // 且需要 1MB 数组；按分钟聚合后只需 1440 次迭代。
     private const int MinuteSlots = 1440;
+    private const int ShardCount = 4;
 
-    private readonly int[] _secondCounts = new int[SecondSlots];
-    private readonly long[] _secondStamps = new long[SecondSlots];
-
-    private readonly int[] _minuteCounts = new int[MinuteSlots];
-    private readonly long[] _minuteStamps = new long[MinuteSlots];
-
-    private readonly object _lock = new();
+    private readonly Shard[] _shards;
     private readonly Func<DateTimeOffset> _clock;
     private readonly DateTimeOffset _startedAt;
-
-    private long _totalQueries;
 
     /// <param name="clock">时间源，测试可注入以驱动时间窗口。</param>
     public DnsQueryStatistics(Func<DateTimeOffset>? clock = null)
@@ -39,9 +32,7 @@ public sealed class DnsQueryStatistics
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
         _startedAt = _clock();
 
-        // 槽位初值 0 会与"Unix 纪元第 0 秒"混淆，用 -1 表示空槽
-        Array.Fill(_secondStamps, -1L);
-        Array.Fill(_minuteStamps, -1L);
+        _shards = Enumerable.Range(0, ShardCount).Select(_ => new Shard()).ToArray();
     }
 
     /// <summary>记录一次 DNS 查询。</summary>
@@ -49,12 +40,13 @@ public sealed class DnsQueryStatistics
     {
         var second = _clock().ToUnixTimeSeconds();
         var minute = FloorDiv(second, 60);
+        var shard = GetShard();
 
-        lock (_lock)
+        lock (shard.Gate)
         {
-            _totalQueries++;
-            Bump(_secondCounts, _secondStamps, SecondSlots, second);
-            Bump(_minuteCounts, _minuteStamps, MinuteSlots, minute);
+            shard.TotalQueries++;
+            Bump(shard.SecondCounts, shard.SecondStamps, SecondSlots, second);
+            Bump(shard.MinuteCounts, shard.MinuteStamps, MinuteSlots, minute);
         }
     }
 
@@ -65,21 +57,44 @@ public sealed class DnsQueryStatistics
         var second = now.ToUnixTimeSeconds();
         var minute = FloorDiv(second, 60);
 
-        lock (_lock)
+        var totalQueries = 0L;
+        var perSecond = 0;
+        var perMinute = 0;
+        var perHour = 0;
+        var perDay = 0;
+        var recentSeconds = new int[60];
+
+        foreach (var shard in _shards)
         {
-            return new DnsQueryStats
+            lock (shard.Gate)
             {
-                TotalQueries = _totalQueries,
-                PerSecond = SumSlots(_secondCounts, _secondStamps, SecondSlots, second, 1),
-                PerMinute = SumSlots(_secondCounts, _secondStamps, SecondSlots, second, 60),
-                PerHour = SumSlots(_secondCounts, _secondStamps, SecondSlots, second, SecondSlots),
-                PerDay = SumSlots(_minuteCounts, _minuteStamps, MinuteSlots, minute, MinuteSlots),
-                // 趋势图数据：按时间升序，最后一项为当前秒
-                RecentSeconds = TailSeries(_secondCounts, _secondStamps, SecondSlots, second, 60),
-                UptimeSeconds = (now - _startedAt).TotalSeconds
-            };
+                totalQueries += shard.TotalQueries;
+                perSecond += SumSlots(shard.SecondCounts, shard.SecondStamps, SecondSlots, second, 1);
+                perMinute += SumSlots(shard.SecondCounts, shard.SecondStamps, SecondSlots, second, 60);
+                perHour += SumSlots(shard.SecondCounts, shard.SecondStamps, SecondSlots, second, SecondSlots);
+                perDay += SumSlots(shard.MinuteCounts, shard.MinuteStamps, MinuteSlots, minute, MinuteSlots);
+
+                var series = TailSeries(shard.SecondCounts, shard.SecondStamps, SecondSlots, second, 60);
+                for (var i = 0; i < recentSeconds.Length; i++)
+                    recentSeconds[i] += series[i];
+            }
         }
+
+        return new DnsQueryStats
+        {
+            TotalQueries = totalQueries,
+            PerSecond = perSecond,
+            PerMinute = perMinute,
+            PerHour = perHour,
+            PerDay = perDay,
+            // 趋势图数据：按时间升序，最后一项为当前秒
+            RecentSeconds = recentSeconds,
+            UptimeSeconds = (now - _startedAt).TotalSeconds
+        };
     }
+
+    private Shard GetShard()
+        => _shards[Environment.CurrentManagedThreadId & (ShardCount - 1)];
 
     /// <summary>给 tick 对应的槽加一；槽内时刻过期则先归零再计。</summary>
     private static void Bump(int[] counts, long[] stamps, int slots, long tick)
@@ -142,6 +157,23 @@ public sealed class DnsQueryStatistics
         if (value % divisor != 0 && ((value < 0) != (divisor < 0)))
             q--;
         return q;
+    }
+
+    private sealed class Shard
+    {
+        public object Gate { get; } = new();
+        public int[] SecondCounts { get; } = new int[SecondSlots];
+        public long[] SecondStamps { get; } = new long[SecondSlots];
+        public int[] MinuteCounts { get; } = new int[MinuteSlots];
+        public long[] MinuteStamps { get; } = new long[MinuteSlots];
+        public long TotalQueries { get; set; }
+
+        public Shard()
+        {
+            // 槽位初值 0 会与"Unix 纪元第 0 秒"混淆，用 -1 表示空槽
+            Array.Fill(SecondStamps, -1L);
+            Array.Fill(MinuteStamps, -1L);
+        }
     }
 }
 

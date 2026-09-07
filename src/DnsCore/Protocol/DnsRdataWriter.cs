@@ -1,4 +1,5 @@
 using DnsCore.Models;
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -20,7 +21,7 @@ public static class DnsRdataWriter
         error = null;
         try
         {
-            var probe = new DnsWriter(256);
+            using var probe = new DnsWriter(256);
             Write(probe, type, value);
             return true;
         }
@@ -84,7 +85,11 @@ public static class DnsRdataWriter
         if (!IPAddress.TryParse(value, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork)
             throw new ArgumentException($"无效的 IPv4 地址: {value}", nameof(value));
 
-        writer.WriteBytes(ip.GetAddressBytes());
+        Span<byte> bytes = stackalloc byte[4];
+        if (!ip.TryWriteBytes(bytes, out _))
+            throw new ArgumentException($"无效的 IPv4 地址: {value}", nameof(value));
+
+        writer.WriteBytes(bytes);
     }
 
     private static void WriteIPv6(DnsWriter writer, string value)
@@ -92,7 +97,11 @@ public static class DnsRdataWriter
         if (!IPAddress.TryParse(value, out var ip) || ip.AddressFamily != AddressFamily.InterNetworkV6)
             throw new ArgumentException($"无效的 IPv6 地址: {value}", nameof(value));
 
-        writer.WriteBytes(ip.GetAddressBytes());
+        Span<byte> bytes = stackalloc byte[16];
+        if (!ip.TryWriteBytes(bytes, out _))
+            throw new ArgumentException($"无效的 IPv6 地址: {value}", nameof(value));
+
+        writer.WriteBytes(bytes);
     }
 
     /// <summary>
@@ -101,19 +110,41 @@ public static class DnsRdataWriter
     /// </summary>
     private static void WriteTxt(DnsWriter writer, string value)
     {
-        var bytes = Encoding.UTF8.GetBytes(value);
+        var byteCount = Encoding.UTF8.GetByteCount(value);
 
-        if (bytes.Length == 0)
+        if (byteCount == 0)
         {
             writer.WriteByte(0);
             return;
         }
 
+        if (byteCount <= 512)
+        {
+            Span<byte> bytes = stackalloc byte[byteCount];
+            var written = Encoding.UTF8.GetBytes(value, bytes);
+            WriteTxtChunks(writer, bytes[..written]);
+            return;
+        }
+
+        var rented = ArrayPool<byte>.Shared.Rent(byteCount);
+        try
+        {
+            var written = Encoding.UTF8.GetBytes(value, rented);
+            WriteTxtChunks(writer, rented.AsSpan(0, written));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    private static void WriteTxtChunks(DnsWriter writer, ReadOnlySpan<byte> bytes)
+    {
         for (var offset = 0; offset < bytes.Length; offset += DnsLimits.MaxTxtChunkLength)
         {
             var chunk = Math.Min(DnsLimits.MaxTxtChunkLength, bytes.Length - offset);
             writer.WriteByte((byte)chunk);
-            writer.WriteBytes(bytes.AsSpan(offset, chunk));
+            writer.WriteBytes(bytes[offset..(offset + chunk)]);
         }
     }
 

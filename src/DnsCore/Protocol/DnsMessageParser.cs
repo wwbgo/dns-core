@@ -34,6 +34,12 @@ public static class DnsMessageParser
         if (header.QuestionCount > DnsLimits.MaxQuestionCount)
             throw new InvalidDataException($"DNS question 数量异常: {header.QuestionCount}");
 
+        // 查询报文中的 answer/authority/additional 计数同样来自不可信输入。
+        // EDNS0 查询通常只有 0/1 条 additional，限制总记录数避免恶意计数驱动空转。
+        var resourceRecordCount = (int)header.AnswerCount + header.AuthorityCount + header.AdditionalCount;
+        if (resourceRecordCount > DnsLimits.MaxQueryResourceRecords)
+            throw new InvalidDataException($"DNS 附加记录数量异常: {resourceRecordCount}");
+
         var reader = new DnsReader(data) { Position = DnsHeader.Size };
         List<DnsQuestion> questions = new(header.QuestionCount);
 
@@ -120,22 +126,51 @@ public static class DnsMessageParser
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var header = request.Header;
-        var answers = request.Answers ?? [];
+        return BuildResponse(
+            request.Header,
+            request.Questions ?? [],
+            request.Answers,
+            request.ResponseCode,
+            request.IsAuthoritative,
+            request.MaxSize,
+            request.IncludeEdnsOpt,
+            request.EdnsPayloadSize);
+    }
 
-        header.SetAsResponse(request.IsAuthoritative);
+    /// <summary>
+    /// 热路径直接参数重载，避免每条响应创建一个 DnsResponseBuildRequest。
+    /// </summary>
+    public static byte[] BuildResponse(
+        DnsHeader header,
+        List<DnsQuestion> questions,
+        List<DnsRecord>? answers,
+        DnsResponseCode responseCode,
+        bool isAuthoritative,
+        int maxSize,
+        bool includeEdnsOpt,
+        int ednsPayloadSize)
+    {
+        ArgumentNullException.ThrowIfNull(header);
+        ArgumentNullException.ThrowIfNull(questions);
+
+        answers ??= [];
+
+        header.SetAsResponse(isAuthoritative);
         header.SetRecursionAvailable();
-        header.SetResponseCode(request.ResponseCode);
+        header.SetResponseCode(responseCode);
 
         // 关键：清零计数后再按实际写入量回填。
         // 沿用请求头的 ARCOUNT（EDNS0 OPT 会置 1）会让应答自称带附加记录而实际没有。
         header.ClearCounts();
-        header.QuestionCount = (ushort)(request.Questions?.Count ?? 0);
+        header.QuestionCount = (ushort)questions.Count;
 
-        var writer = new DnsWriter(512);
+        // 按允许的上限预分配常见 UDP/EDNS 响应大小，减少大响应多次扩容与复制。
+        // 保留 512 字节基准，同时不因 TCP 的 65535 上限而盲目分配大缓冲。
+        var initialCapacity = Math.Min(maxSize, DnsLimits.MaxEdnsPayloadSize);
+        using var writer = new DnsWriter(initialCapacity);
         writer.WriteHeader(header);
 
-        foreach (var question in request.Questions ?? [])
+        foreach (var question in questions)
         {
             writer.WriteDomainName(question.Name);
             writer.WriteUInt16((ushort)question.Type);
@@ -161,7 +196,7 @@ public static class DnsMessageParser
             }
 
             // 超出本次允许的报文上限：回滚并置 TC 位，客户端据此改用 TCP
-            if (writer.Position > request.MaxSize)
+            if (writer.Position > maxSize)
             {
                 writer.Rewind(checkpoint);
                 truncated = true;
@@ -172,12 +207,12 @@ public static class DnsMessageParser
         }
 
         // 若请求带 EDNS0，应答也需带 OPT 记录
-        if (request.IncludeEdnsOpt)
+        if (includeEdnsOpt)
         {
             var checkpoint = writer.Position;
-            WriteOptRecord(writer, request.EdnsPayloadSize);
+            WriteOptRecord(writer, ednsPayloadSize);
 
-            if (writer.Position > request.MaxSize)
+            if (writer.Position > maxSize)
                 writer.Rewind(checkpoint);
             else
                 header.AdditionalCount = 1;

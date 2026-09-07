@@ -11,17 +11,13 @@ public sealed class DnsLatencyStatistics
 {
     // 百分位数只需要一个足够代表近期分布的窗口，1000 条即可
     private const int SampleCapacity = 1000;
+    private const int ShardCount = 4;
+    private const int SamplesPerShard = SampleCapacity / ShardCount;
 
-    private readonly double[] _samples = new double[SampleCapacity];
-    private readonly object _lock = new();
+    private readonly Shard[] _shards;
 
-    private int _writeIndex;
-    private int _sampleCount;
-
-    private long _totalRequests;
-    private double _totalLatencyMs;
-    private double _minLatencyMs = double.MaxValue;
-    private double _maxLatencyMs;
+    public DnsLatencyStatistics()
+        => _shards = Enumerable.Range(0, ShardCount).Select(_ => new Shard()).ToArray();
 
     /// <summary>
     /// 记录一次请求的延迟。
@@ -29,55 +25,64 @@ public sealed class DnsLatencyStatistics
     /// <param name="latencyMs">延迟毫秒数；非有限值或负值会被丢弃。</param>
     public void RecordLatency(double latencyMs)
     {
-        // NaN 会通过 _totalLatencyMs 永久污染平均值——加法一旦得到 NaN 就再也回不来，
+        // NaN 会通过累加永久污染平均值——加法一旦得到 NaN 就再也回不来，
         // 后续所有正常样本都救不回，只能重启进程。负值同理会污染最小值。
         // 调用方现在用单调时钟，正常不会产出这两类值，但统计类不应依赖调用方的正确性。
         if (!double.IsFinite(latencyMs) || latencyMs < 0)
             return;
 
-        lock (_lock)
+        var shard = GetShard();
+
+        lock (shard.Gate)
         {
-            _totalRequests++;
-            _totalLatencyMs += latencyMs;
+            shard.TotalRequests++;
+            shard.TotalLatencyMs += latencyMs;
 
-            if (latencyMs < _minLatencyMs)
-                _minLatencyMs = latencyMs;
+            if (latencyMs < shard.MinLatencyMs)
+                shard.MinLatencyMs = latencyMs;
 
-            if (latencyMs > _maxLatencyMs)
-                _maxLatencyMs = latencyMs;
+            if (latencyMs > shard.MaxLatencyMs)
+                shard.MaxLatencyMs = latencyMs;
 
             // 环形写入：O(1)，无搬移、无分配
-            _samples[_writeIndex] = latencyMs;
-            _writeIndex = (_writeIndex + 1) % SampleCapacity;
+            shard.Samples[shard.WriteIndex] = latencyMs;
+            shard.WriteIndex = (shard.WriteIndex + 1) % SamplesPerShard;
 
-            if (_sampleCount < SampleCapacity)
-                _sampleCount++;
+            if (shard.SampleCount < SamplesPerShard)
+                shard.SampleCount++;
         }
     }
 
     /// <summary>获取延迟统计快照。</summary>
     public LatencyStats GetStats()
     {
-        double[] snapshot;
-        long total;
-        double sum, min, max;
+        long total = 0;
+        double sum = 0;
+        var min = double.MaxValue;
+        var max = 0d;
+        var snapshot = new double[SampleCapacity];
+        var offset = 0;
 
-        // 锁内只做定长拷贝；排序留到锁外，避免阻塞热路径上的写入
-        lock (_lock)
+        foreach (var shard in _shards)
         {
-            if (_totalRequests == 0)
-                return new LatencyStats();
+            lock (shard.Gate)
+            {
+                total += shard.TotalRequests;
+                sum += shard.TotalLatencyMs;
+                min = Math.Min(min, shard.MinLatencyMs);
+                max = Math.Max(max, shard.MaxLatencyMs);
 
-            total = _totalRequests;
-            sum = _totalLatencyMs;
-            min = _minLatencyMs;
-            max = _maxLatencyMs;
-
-            snapshot = new double[_sampleCount];
-            Array.Copy(_samples, snapshot, _sampleCount);
+                Array.Copy(shard.Samples, 0, snapshot, offset, shard.SampleCount);
+                offset += shard.SampleCount;
+            }
         }
 
-        Array.Sort(snapshot);
+        if (total == 0)
+            return new LatencyStats();
+
+        // 排序留到锁外，避免阻塞热路径上的写入
+        var sorted = snapshot.AsSpan(0, offset).ToArray();
+        Array.Sort(sorted);
 
         return new LatencyStats
         {
@@ -85,11 +90,14 @@ public sealed class DnsLatencyStatistics
             AverageMs = Math.Round(sum / total, 2),
             MinMs = Math.Round(min, 2),
             MaxMs = Math.Round(max, 2),
-            P50Ms = Math.Round(Percentile(snapshot, 0.50), 2),
-            P95Ms = Math.Round(Percentile(snapshot, 0.95), 2),
-            P99Ms = Math.Round(Percentile(snapshot, 0.99), 2)
+            P50Ms = Math.Round(Percentile(sorted, 0.50), 2),
+            P95Ms = Math.Round(Percentile(sorted, 0.95), 2),
+            P99Ms = Math.Round(Percentile(sorted, 0.99), 2)
         };
     }
+
+    private Shard GetShard()
+        => _shards[Environment.CurrentManagedThreadId & (ShardCount - 1)];
 
     /// <summary>最近邻排位法取百分位数。</summary>
     private static double Percentile(double[] sorted, double percentile)
@@ -99,6 +107,18 @@ public sealed class DnsLatencyStatistics
 
         var index = (int)Math.Ceiling(sorted.Length * percentile) - 1;
         return sorted[Math.Clamp(index, 0, sorted.Length - 1)];
+    }
+
+    private sealed class Shard
+    {
+        public object Gate { get; } = new();
+        public double[] Samples { get; } = new double[SamplesPerShard];
+        public int WriteIndex { get; set; }
+        public int SampleCount { get; set; }
+        public long TotalRequests { get; set; }
+        public double TotalLatencyMs { get; set; }
+        public double MinLatencyMs { get; set; } = double.MaxValue;
+        public double MaxLatencyMs { get; set; }
     }
 }
 

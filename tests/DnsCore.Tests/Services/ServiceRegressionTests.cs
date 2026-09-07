@@ -86,6 +86,20 @@ public class ServiceRegressionTests
     }
 
     [Fact]
+    public void Cache_ConcurrentWrites_ShouldNotExceedCapacity()
+    {
+        var cache = CreateCache(new CacheOptions { MaxEntries = 64 });
+
+        Parallel.For(0, 2000, i =>
+        {
+            var domain = $"d{i % 200}.com";
+            cache.Set(domain, DnsRecordType.A, [Record(domain, $"10.0.0.{i % 250}")]);
+        });
+
+        cache.GetStats().TotalEntries.Should().BeLessThanOrEqualTo(64);
+    }
+
+    [Fact]
     public void Cache_ShouldClampNonPositiveTtl()
     {
         // 修复前 TTL<=0 会算出负 TimeSpan，条目写入即过期

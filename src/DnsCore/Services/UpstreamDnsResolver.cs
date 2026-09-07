@@ -1,10 +1,12 @@
 using DnsCore.Configuration;
 using DnsCore.Models;
 using DnsCore.Protocol;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace DnsCore.Services;
 
@@ -31,10 +33,12 @@ public sealed class UpstreamDnsResolver(
     DnsServerOptions serverOptions) : IDisposable
 {
     private volatile IPAddress[] _upstreamServers = [];
+    private readonly ConcurrentDictionary<IPAddress, UpstreamSocketPool> _socketPools = new();
     private readonly SemaphoreSlim _concurrencyLimit =
         new(Math.Max(1, serverOptions.Upstream.MaxConcurrentQueries));
 
     private const int DnsPort = 53;
+    private const int MaxPooledSocketsPerUpstream = 64;
 
     private int TimeoutMs => Math.Max(200, serverOptions.Upstream.TimeoutMilliseconds);
 
@@ -59,7 +63,18 @@ public sealed class UpstreamDnsResolver(
         if (parsed.Count == 0)
             parsed.AddRange(LoadSystemDnsServers());
 
-        _upstreamServers = [.. parsed.Distinct()];
+        IPAddress[] effective = [.. parsed.Distinct()];
+        var previousServers = _socketPools.Keys.ToArray();
+        _upstreamServers = effective;
+
+        // 关闭已不在生效列表中的 socket 池。Close 只清理空闲 socket，
+        // 在飞查询仍持有各自租约，返回或废弃时再释放。
+        var active = new HashSet<IPAddress>(effective);
+        foreach (var server in previousServers)
+        {
+            if (!active.Contains(server) && _socketPools.TryRemove(server, out var pool))
+                pool.Close();
+        }
     }
 
     /// <summary>
@@ -199,33 +214,64 @@ public sealed class UpstreamDnsResolver(
         // 每次查询使用新的随机 TXID，绝不复用客户端的 TXID
         var transactionId = (ushort)RandomNumberGenerator.GetInt32(1, ushort.MaxValue);
 
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeoutMs);
+
+        var pool = GetSocketPool(server);
+        UpstreamSocketLease lease;
+
         try
         {
-            var queryData = BuildQuery(transactionId, domain, type, classValue);
-
-            using var udpClient = new UdpClient(server.AddressFamily);
-            udpClient.Connect(new IPEndPoint(server, DnsPort));
-
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(TimeoutMs);
-
-            await udpClient.SendAsync(queryData, timeoutCts.Token);
-
-            // 可能收到伪造/迟到的包，需循环直到拿到匹配的应答或超时
-            while (!timeoutCts.IsCancellationRequested)
-            {
-                var result = await udpClient.ReceiveAsync(timeoutCts.Token);
-
-                var response = ValidateAndParse(
-                    result.Buffer, transactionId, domain, type, classValue, server);
-
-                if (response is not null)
-                    return response;
-
-                logger.LogDebug("丢弃与查询不匹配的上游应答: {Server} {Domain} {Type}", server, domain, type);
-            }
-
+            lease = await pool.RentAsync(timeoutCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogDebug("上游 DNS 查询超时: {Server} {Domain} {Type}", server, domain, type);
             return null;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "租用上游 socket 失败: {Server}", server);
+            return null;
+        }
+
+        var returnToPool = false;
+
+        try
+        {
+            try
+            {
+                var queryData = BuildQuery(transactionId, domain, type, classValue);
+                var udpClient = lease.Client;
+
+                await udpClient.SendAsync(queryData, timeoutCts.Token);
+
+                // 可能收到伪造/迟到的包，需循环直到拿到匹配的应答或超时
+                while (!timeoutCts.IsCancellationRequested)
+                {
+                    var result = await udpClient.ReceiveAsync(timeoutCts.Token);
+
+                    var response = ValidateAndParse(
+                        result.Buffer, transactionId, domain, type, classValue, server);
+
+                    if (response is not null)
+                    {
+                        returnToPool = true;
+                        return response;
+                    }
+
+                    logger.LogDebug("丢弃与查询不匹配的上游应答: {Server} {Domain} {Type}", server, domain, type);
+                }
+
+                return null;
+            }
+            finally
+            {
+                if (returnToPool)
+                    lease.Return();
+                else
+                    lease.Discard();
+            }
         }
         catch (OperationCanceledException)
         {
@@ -245,6 +291,9 @@ public sealed class UpstreamDnsResolver(
     /// </summary>
     private static byte[] BuildQuery(ushort transactionId, string domain, DnsRecordType type, ushort classValue)
     {
+        // 上游查询使用栈上缓冲直接编码，不创建 DnsWriter 与压缩字典。
+        Span<byte> buffer = stackalloc byte[512];
+
         var header = new DnsHeader
         {
             TransactionId = transactionId,
@@ -252,13 +301,40 @@ public sealed class UpstreamDnsResolver(
             QuestionCount = 1
         };
 
-        var writer = new DnsWriter(64);
-        writer.WriteHeader(header);
-        writer.WriteDomainName(domain, useCompression: false);
-        writer.WriteUInt16((ushort)type);
-        writer.WriteUInt16(classValue);
+        header.WriteTo(buffer);
+        var position = DnsHeader.Size;
+        WriteQueryDomain(buffer, ref position, domain);
 
-        return writer.ToArray();
+        buffer[position++] = (byte)((ushort)type >> 8);
+        buffer[position++] = (byte)((ushort)type & 0xFF);
+        buffer[position++] = (byte)(classValue >> 8);
+        buffer[position++] = (byte)(classValue & 0xFF);
+
+        return buffer[..position].ToArray();
+    }
+
+    private static void WriteQueryDomain(Span<byte> buffer, ref int position, string domain)
+    {
+        var remaining = domain.TrimEnd('.').AsSpan();
+        Span<byte> labelBytes = stackalloc byte[DnsLimits.MaxLabelLength];
+
+        while (!remaining.IsEmpty)
+        {
+            var dot = remaining.IndexOf('.');
+            var label = dot < 0 ? remaining : remaining[..dot];
+            var labelLength = Encoding.ASCII.GetBytes(label, labelBytes);
+
+            buffer[position++] = (byte)labelLength;
+            labelBytes[..labelLength].CopyTo(buffer[position..]);
+            position += labelLength;
+
+            if (dot < 0)
+                break;
+
+            remaining = remaining[(dot + 1)..];
+        }
+
+        buffer[position++] = 0;
     }
 
     /// <summary>
@@ -336,11 +412,14 @@ public sealed class UpstreamDnsResolver(
         switch (type)
         {
             case DnsRecordType.A when rdLength == 4:
-                value = new IPAddress(reader.ReadBytes(4).ToArray()).ToString();
+            {
+                var ipv4 = reader.ReadBytes(4);
+                value = $"{ipv4[0]}.{ipv4[1]}.{ipv4[2]}.{ipv4[3]}";
                 break;
+            }
 
             case DnsRecordType.AAAA when rdLength == 16:
-                value = new IPAddress(reader.ReadBytes(16).ToArray()).ToString();
+                value = new IPAddress(reader.ReadBytes(16)).ToString();
                 break;
 
             case DnsRecordType.CNAME:
@@ -436,5 +515,156 @@ public sealed class UpstreamDnsResolver(
         return result;
     }
 
-    public void Dispose() => _concurrencyLimit.Dispose();
+    private UpstreamSocketPool GetSocketPool(IPAddress server)
+        => _socketPools.GetOrAdd(
+            server,
+            address => new UpstreamSocketPool(
+                address,
+                Math.Clamp(serverOptions.Upstream.MaxConcurrentQueries, 1, MaxPooledSocketsPerUpstream)));
+
+    public void Dispose()
+    {
+        foreach (var pool in _socketPools.Values)
+            pool.Close();
+
+        _socketPools.Clear();
+        _concurrencyLimit.Dispose();
+    }
+
+    private sealed class UpstreamSocketLease(UpstreamSocketPool pool, UdpClient client)
+    {
+        private readonly UdpClient _client = client;
+        private int _returned;
+
+        public UdpClient Client => _client;
+
+        public void Return()
+        {
+            if (Interlocked.Exchange(ref _returned, 1) == 0)
+                pool.Return(_client);
+        }
+
+        public void Discard()
+        {
+            if (Interlocked.Exchange(ref _returned, 1) == 0)
+                pool.Discard(_client);
+        }
+    }
+
+    private sealed class UpstreamSocketPool(IPAddress server, int capacity)
+    {
+        private readonly ConcurrentQueue<UdpClient> _idle = new();
+        private readonly SemaphoreSlim _slots = new(Math.Max(1, capacity), Math.Max(1, capacity));
+        private int _closed;
+        private int _activeLeases;
+        private int _gateDisposed;
+
+        public async Task<UpstreamSocketLease> RentAsync(CancellationToken cancellationToken)
+        {
+            if (Volatile.Read(ref _closed) != 0)
+                throw new OperationCanceledException();
+
+            try
+            {
+                await _slots.WaitAsync(cancellationToken);
+            }
+            catch (ObjectDisposedException)
+            {
+                throw new OperationCanceledException();
+            }
+
+            Interlocked.Increment(ref _activeLeases);
+
+            try
+            {
+                if (Volatile.Read(ref _closed) != 0)
+                    throw new OperationCanceledException();
+
+                if (_idle.TryDequeue(out var client))
+                {
+                    if (Volatile.Read(ref _closed) != 0)
+                    {
+                        client.Dispose();
+                        throw new OperationCanceledException();
+                    }
+
+                    return new UpstreamSocketLease(this, client);
+                }
+
+                var created = CreateConnectedClient();
+                if (Volatile.Read(ref _closed) != 0)
+                {
+                    created.Dispose();
+                    throw new OperationCanceledException();
+                }
+
+                return new UpstreamSocketLease(this, created);
+            }
+            catch
+            {
+                _slots.Release();
+                LeaseReturned();
+                throw;
+            }
+        }
+
+        public void Return(UdpClient client)
+        {
+            if (Volatile.Read(ref _closed) == 0)
+            {
+                _idle.Enqueue(client);
+            }
+            else
+            {
+                client.Dispose();
+                _slots.Release();
+            }
+
+            LeaseReturned();
+        }
+
+        public void Discard(UdpClient client)
+        {
+            client.Dispose();
+            _slots.Release();
+            LeaseReturned();
+        }
+
+        public void Close()
+        {
+            if (Interlocked.Exchange(ref _closed, 1) != 0)
+                return;
+
+            while (_idle.TryDequeue(out var client))
+            {
+                client.Dispose();
+                _slots.Release();
+            }
+
+            TryDisposeGate();
+        }
+
+        private void LeaseReturned()
+        {
+            if (Interlocked.Decrement(ref _activeLeases) == 0)
+                TryDisposeGate();
+        }
+
+        private void TryDisposeGate()
+        {
+            if (Volatile.Read(ref _closed) != 0
+                && Volatile.Read(ref _activeLeases) == 0
+                && Interlocked.Exchange(ref _gateDisposed, 1) == 0)
+            {
+                _slots.Dispose();
+            }
+        }
+
+        private UdpClient CreateConnectedClient()
+        {
+            var client = new UdpClient(server.AddressFamily);
+            client.Connect(new IPEndPoint(server, DnsPort));
+            return client;
+        }
+    }
 }

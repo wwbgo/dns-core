@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 
 namespace DnsCore.Services;
@@ -9,9 +10,13 @@ namespace DnsCore.Services;
 /// </summary>
 public sealed class ClientRateLimiter(int maxQueriesPerSecond)
 {
+    private static readonly double TickFrequency = Stopwatch.Frequency;
+    private static readonly long SweepIntervalTicks = (long)(TickFrequency * TimeSpan.FromMinutes(5).TotalSeconds);
+    private static readonly long IdleExpiryTicks = (long)(TickFrequency * TimeSpan.FromMinutes(10).TotalSeconds);
+
     private readonly ConcurrentDictionary<IPAddress, Bucket> _buckets = new();
     private readonly int _capacity = Math.Max(1, maxQueriesPerSecond);
-    private DateTime _lastSweep = DateTime.UtcNow;
+    private long _lastSweepTicks = Stopwatch.GetTimestamp();
 
     public bool Enabled { get; } = maxQueriesPerSecond > 0;
 
@@ -21,7 +26,7 @@ public sealed class ClientRateLimiter(int maxQueriesPerSecond)
         if (!Enabled || client is null)
             return true;
 
-        var now = DateTime.UtcNow;
+        var now = Stopwatch.GetTimestamp();
         SweepIfNeeded(now);
 
         var bucket = _buckets.GetOrAdd(client, _ => new Bucket(_capacity, now));
@@ -29,11 +34,11 @@ public sealed class ClientRateLimiter(int maxQueriesPerSecond)
         lock (bucket)
         {
             // 按经过的时间线性补充令牌
-            var elapsed = (now - bucket.LastRefill).TotalSeconds;
-            if (elapsed > 0)
+            var elapsedSeconds = (now - bucket.LastRefillTicks) / TickFrequency;
+            if (elapsedSeconds > 0)
             {
-                bucket.Tokens = Math.Min(_capacity, bucket.Tokens + elapsed * _capacity);
-                bucket.LastRefill = now;
+                bucket.Tokens = Math.Min(_capacity, bucket.Tokens + elapsedSeconds * _capacity);
+                bucket.LastRefillTicks = now;
             }
 
             if (bucket.Tokens < 1)
@@ -45,23 +50,24 @@ public sealed class ClientRateLimiter(int maxQueriesPerSecond)
     }
 
     /// <summary>定期清理空闲客户端，避免桶字典无界增长（本身也是内存耗尽面）</summary>
-    private void SweepIfNeeded(DateTime now)
+    private void SweepIfNeeded(long now)
     {
-        if (now - _lastSweep < TimeSpan.FromMinutes(5))
+        var lastSweep = Interlocked.Read(ref _lastSweepTicks);
+        if (now - lastSweep < SweepIntervalTicks)
             return;
 
-        _lastSweep = now;
+        Interlocked.Exchange(ref _lastSweepTicks, now);
 
         foreach (var (key, bucket) in _buckets)
         {
-            if (now - bucket.LastRefill > TimeSpan.FromMinutes(10))
+            if (now - bucket.LastRefillTicks > IdleExpiryTicks)
                 _buckets.TryRemove(key, out _);
         }
     }
 
-    private sealed class Bucket(double tokens, DateTime lastRefill)
+    private sealed class Bucket(double tokens, long lastRefillTicks)
     {
         public double Tokens { get; set; } = tokens;
-        public DateTime LastRefill { get; set; } = lastRefill;
+        public long LastRefillTicks { get; set; } = lastRefillTicks;
     }
 }

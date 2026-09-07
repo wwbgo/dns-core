@@ -40,6 +40,7 @@ const $ = {
     refreshBtn: document.getElementById('refreshBtn'),
     searchInput: document.getElementById('searchInput'),
     searchClear: document.getElementById('searchClear'),
+    exactSearch: document.getElementById('exactSearch'),
     filterCount: document.getElementById('filterCount'),
     addRecordForm: document.getElementById('addRecordForm'),
     recordFormTitle: document.getElementById('recordFormTitle'),
@@ -130,10 +131,12 @@ function bindEvents() {
     $.refreshBtn.addEventListener('click', handleRefresh);
     $.searchInput.addEventListener('input', handleSearch);
     $.searchClear.addEventListener('click', clearSearch);
+    $.exactSearch.addEventListener('change', handleSearch);
     $.addRecordForm.addEventListener('submit', handleAddRecord);
     $.cancelEditBtn.addEventListener('click', resetRecordForm);
     $.clearAllBtn.addEventListener('click', handleClearAll);
     $.typeSelect.addEventListener('change', updateFormHints);
+    $.recordsBody.addEventListener('click', handleRecordAction);
     updateFormHints();
 
     // 上游配置
@@ -1296,18 +1299,21 @@ function renderRecords(records) {
     }).join('');
 
     $.recordsBody.innerHTML = html;
-
-    // 用事件委托替代 inline onclick，避免 JS 字符串转义问题
-    $.recordsBody.querySelectorAll('.row-edit').forEach(btn => {
-        btn.addEventListener('click', handleEditRecord);
-    });
-    $.recordsBody.querySelectorAll('.row-del').forEach(btn => {
-        btn.addEventListener('click', handleDeleteRecord);
-    });
 }
 
-function handleEditRecord(event) {
-    const row = event.currentTarget.closest('tr');
+function handleRecordAction(event) {
+    const button = event.target.closest('button');
+    if (!button || !$.recordsBody.contains(button)) return;
+
+    if (button.classList.contains('row-edit')) {
+        handleEditRecord(button);
+    } else if (button.classList.contains('row-del')) {
+        handleDeleteRecord(button);
+    }
+}
+
+function handleEditRecord(button) {
+    const row = button.closest('tr');
     const record = {
         domain: row.dataset.domain,
         type: row.dataset.type,
@@ -1405,8 +1411,8 @@ async function handleAddRecord(e) {
     }
 }
 
-async function handleDeleteRecord(event) {
-    const btn = event.currentTarget;
+async function handleDeleteRecord(button) {
+    const btn = button;
     const row = btn.closest('tr');
     const domain = row.dataset.domain;
     const type = row.dataset.type;
@@ -1468,21 +1474,36 @@ function handleSearch() {
 }
 
 function applySearchFilter() {
-    const query = $.searchInput.value.trim().toLowerCase();
-    $.searchClear.hidden = !query;
+    const rawQuery = $.searchInput.value.trim();
+    const query = rawQuery.toLowerCase();
+    const exact = $.exactSearch.checked;
 
-    if (!query) {
+    $.searchClear.hidden = !rawQuery;
+    $.searchInput.placeholder = exact
+        ? '输入完整域名、类型或记录值'
+        : '搜索域名、类型或记录值';
+
+    if (!rawQuery) {
         renderRecords(allRecords);
         $.filterCount.textContent = '';
         return;
     }
 
-    const filtered = allRecords.filter(rec =>
-        rec.domain.toLowerCase().includes(query) ||
-        rec.type.toLowerCase().includes(query) ||
-        rec.value.toLowerCase().includes(query) ||
-        String(rec.weight ?? 1).includes(query)
-    );
+    const filtered = allRecords.filter(rec => {
+        const weight = String(rec.weight ?? 1);
+
+        if (exact) {
+            return rec.domain.toLowerCase() === query ||
+                rec.type.toLowerCase() === query ||
+                rec.value.toLowerCase() === query ||
+                weight === rawQuery;
+        }
+
+        return rec.domain.toLowerCase().includes(query) ||
+            rec.type.toLowerCase().includes(query) ||
+            rec.value.toLowerCase().includes(query) ||
+            weight.includes(query);
+    });
 
     renderRecords(filtered);
     $.filterCount.textContent = `找到 ${filtered.length} / ${allRecords.length} 条`;
@@ -1507,12 +1528,33 @@ async function handleRefresh() {
     }
 }
 
+let autoRefreshTimer = 0;
+let autoRefreshInFlight = false;
+
 function startAutoRefresh() {
-    setInterval(() => {
+    scheduleAutoRefresh();
+}
+
+function scheduleAutoRefresh() {
+    clearTimeout(autoRefreshTimer);
+    autoRefreshTimer = setTimeout(runAutoRefresh, 30000);
+}
+
+async function runAutoRefresh() {
+    if (autoRefreshInFlight) {
+        scheduleAutoRefresh();
+        return;
+    }
+
+    autoRefreshInFlight = true;
+    try {
         const viewId = getActiveView();
         if (viewId === 'upstream' && !$.upstreamWarn.hidden) return;
-        loadViewData(viewId);
-    }, 30000);
+        await loadViewData(viewId);
+    } finally {
+        autoRefreshInFlight = false;
+        scheduleAutoRefresh();
+    }
 }
 
 // --- Toast 提示 -----------------------------------------------------------

@@ -184,6 +184,35 @@ public class CustomRecordStoreTests
     }
 
     [Fact]
+    public void QueryANY_ShouldReflectRemovedType()
+    {
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.A, Value = "1.1.1.1" });
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.TXT, Value = "v=spf1" });
+
+        _store.RemoveRecord("test.com", DnsRecordType.A).Should().BeTrue();
+
+        var result = _store.Query("test.com", DnsRecordType.ANY);
+        result.Should().NotBeNull();
+        result.Should().ContainSingle();
+        result![0].Type.Should().Be(DnsRecordType.TXT);
+    }
+
+    [Fact]
+    public void QueryANY_ShouldReflectRemovedValue()
+    {
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.A, Value = "1.1.1.1" });
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.A, Value = "2.2.2.2" });
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.TXT, Value = "v=spf1" });
+
+        _store.RemoveRecord("test.com", DnsRecordType.A, "1.1.1.1").Should().BeTrue();
+
+        var result = _store.Query("test.com", DnsRecordType.ANY);
+        result.Should().NotBeNull();
+        result.Should().HaveCount(2);
+        result!.Should().NotContain(r => r.Value == "1.1.1.1");
+    }
+
+    [Fact]
     public void RemoveRecord_ShouldReturnFalse_WhenRecordNotFound()
     {
         // Act
@@ -206,6 +235,39 @@ public class CustomRecordStoreTests
         // Assert
         _store.Query("test1.com", DnsRecordType.A).Should().BeNull();
         _store.Query("test2.com", DnsRecordType.A).Should().BeNull();
+    }
+
+    [Fact]
+    public void ContainsDomain_ShouldDropDomain_WhenLastTypeRemoved()
+    {
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.A, Value = "1.1.1.1" });
+        _store.ContainsDomain("test.com").Should().BeTrue();
+
+        _store.RemoveRecord("test.com", DnsRecordType.A).Should().BeTrue();
+
+        _store.ContainsDomain("test.com").Should().BeFalse();
+    }
+
+    [Fact]
+    public void ContainsDomain_ShouldDropWildcard_WhenLastTypeRemoved()
+    {
+        _store.AddRecord(new DnsRecord { Domain = "*.example.com", Type = DnsRecordType.A, Value = "1.1.1.1" });
+        _store.ContainsDomain("www.example.com").Should().BeTrue();
+
+        _store.RemoveRecord("*.example.com", DnsRecordType.A).Should().BeTrue();
+
+        _store.ContainsDomain("www.example.com").Should().BeFalse();
+    }
+
+    [Fact]
+    public void ContainsDomain_ShouldRemain_WhenOtherValueStillExists()
+    {
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.A, Value = "1.1.1.1" });
+        _store.AddRecord(new DnsRecord { Domain = "test.com", Type = DnsRecordType.A, Value = "2.2.2.2" });
+
+        _store.RemoveRecord("test.com", DnsRecordType.A, "1.1.1.1").Should().BeTrue();
+
+        _store.ContainsDomain("test.com").Should().BeTrue();
     }
 
     [Fact]

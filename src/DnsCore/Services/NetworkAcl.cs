@@ -8,7 +8,7 @@ namespace DnsCore.Services;
 /// </summary>
 public sealed class NetworkAcl
 {
-    private readonly List<(IPAddress Network, int PrefixLength)> _entries = [];
+    private readonly List<AclEntry> _entries = [];
 
     public bool IsEmpty => _entries.Count == 0;
 
@@ -31,7 +31,8 @@ public sealed class NetworkAcl
                 if (!IPAddress.TryParse(entry, out var single))
                     throw new FormatException($"非法的网段配置: {raw}");
 
-                _entries.Add((single, single.GetAddressBytes().Length * 8));
+                var singleBytes = single.GetAddressBytes();
+                _entries.Add(new AclEntry(single, singleBytes, singleBytes.Length * 8));
                 continue;
             }
 
@@ -42,11 +43,12 @@ public sealed class NetworkAcl
                 || !int.TryParse(prefixPart, out var prefixLength))
                 throw new FormatException($"非法的 CIDR 配置: {raw}");
 
-            var maxPrefix = network.GetAddressBytes().Length * 8;
+            var networkBytes = network.GetAddressBytes();
+            var maxPrefix = networkBytes.Length * 8;
             if (prefixLength < 0 || prefixLength > maxPrefix)
                 throw new FormatException($"CIDR 前缀长度超出范围: {raw}");
 
-            _entries.Add((network, prefixLength));
+            _entries.Add(new AclEntry(network, networkBytes, prefixLength));
         }
     }
 
@@ -59,33 +61,51 @@ public sealed class NetworkAcl
         if (_entries.Count == 0)
             return true;
 
-        // IPv4-mapped IPv6（::ffff:a.b.c.d）需还原为 IPv4 再比对，
-        // 否则双栈监听下 IPv4 客户端会被 IPv4 规则漏判
-        var candidate = address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+        // IPv4-mapped IPv6（::ffff:a.b.c.d）直接读取其字节尾部和完整映射字节，
+        // 避免为每个查询创建 MapToIPv4()/MapToIPv6() 临时 IPAddress。
+        Span<byte> rawBytes = stackalloc byte[16];
+        if (!address.TryWriteBytes(rawBytes, out var rawLength))
+            return false;
 
-        foreach (var (network, prefixLength) in _entries)
+        var isMapped = address.IsIPv4MappedToIPv6;
+        var addressFamily = isMapped ? AddressFamily.InterNetwork : address.AddressFamily;
+        var candidateBytes = isMapped ? rawBytes[12..16] : rawBytes[..rawLength];
+        Span<byte> mappedBytes = stackalloc byte[16];
+
+        foreach (var entry in _entries)
         {
-            if (Matches(candidate, network, prefixLength))
+            if (addressFamily == entry.Network.AddressFamily
+                && Matches(candidateBytes, entry.NetworkBytes, entry.PrefixLength))
+            {
                 return true;
+            }
 
             // 同时允许以映射形式匹配 IPv6 规则
-            if (candidate.AddressFamily == AddressFamily.InterNetwork
-                && network.AddressFamily == AddressFamily.InterNetworkV6
-                && Matches(candidate.MapToIPv6(), network, prefixLength))
-                return true;
+            if (addressFamily == AddressFamily.InterNetwork
+                && entry.Network.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                if (isMapped)
+                {
+                    if (Matches(rawBytes[..16], entry.NetworkBytes, entry.PrefixLength))
+                        return true;
+                }
+                else
+                {
+                    WriteMappedIPv4(candidateBytes, mappedBytes);
+                    if (Matches(mappedBytes, entry.NetworkBytes, entry.PrefixLength))
+                        return true;
+                }
+            }
         }
 
         return false;
     }
 
-    private static bool Matches(IPAddress address, IPAddress network, int prefixLength)
+    private static bool Matches(
+        ReadOnlySpan<byte> addressBytes,
+        ReadOnlySpan<byte> networkBytes,
+        int prefixLength)
     {
-        if (address.AddressFamily != network.AddressFamily)
-            return false;
-
-        var addressBytes = address.GetAddressBytes();
-        var networkBytes = network.GetAddressBytes();
-
         if (addressBytes.Length != networkBytes.Length)
             return false;
 
@@ -104,4 +124,17 @@ public sealed class NetworkAcl
         var mask = (byte)(0xFF << (8 - remainingBits));
         return (addressBytes[fullBytes] & mask) == (networkBytes[fullBytes] & mask);
     }
+
+    private static void WriteMappedIPv4(ReadOnlySpan<byte> ipv4, Span<byte> mapped)
+    {
+        mapped.Clear();
+        mapped[10] = 0xFF;
+        mapped[11] = 0xFF;
+        ipv4.CopyTo(mapped[12..]);
+    }
+
+    private sealed record AclEntry(
+        IPAddress Network,
+        byte[] NetworkBytes,
+        int PrefixLength);
 }

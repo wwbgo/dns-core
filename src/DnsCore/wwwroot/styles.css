@@ -1359,7 +1359,66 @@ input[aria-invalid='true']:focus {
 }
 
 /* --- 搜索框 -------------------------------------------------------------- */
-.search { position: relative; display: flex; align-items: center; }
+.search-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex-wrap: wrap;
+}
+
+.search { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
+
+.search-option {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-height: 36px;
+    color: var(--text-muted);
+    font-size: .88rem;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+}
+
+.search-option input[type='checkbox'] {
+    appearance: none;
+    -webkit-appearance: none;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--surface);
+    box-shadow: none;
+    cursor: pointer;
+    transition: background var(--dur) var(--ease),
+                border-color var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease);
+}
+
+.search-option input[type='checkbox']:checked {
+    background: var(--brand-500);
+    border-color: var(--brand-500);
+}
+
+.search-option input[type='checkbox']:checked::after {
+    content: '';
+    width: 9px;
+    height: 5px;
+    margin-top: -2px;
+    border-left: 2px solid #fff;
+    border-bottom: 2px solid #fff;
+    transform: rotate(-45deg);
+}
+
+.search-option input[type='checkbox']:focus-visible {
+    outline: none;
+    box-shadow: var(--ring);
+}
 
 .search__icon {
     position: absolute;

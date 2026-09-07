@@ -14,7 +14,11 @@ public sealed class CustomRecordStore(
     ILogger<CustomRecordStore> logger,
     IDnsRecordRepository? repository = null)
 {
-    private readonly ConcurrentDictionary<string, ImmutableList<DnsRecord>> _records = new();
+    private static readonly RecordKeyComparer KeyComparer = new();
+
+    private readonly ConcurrentDictionary<RecordKey, ImmutableList<DnsRecord>> _records = new(KeyComparer);
+    private readonly ConcurrentDictionary<string, byte> _domainIndex = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ImmutableList<DnsRecord>> _recordsByDomain = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _persistLock = new(1, 1);
 
     /// <summary>从持久化存储加载记录</summary>
@@ -32,15 +36,18 @@ public sealed class CustomRecordStore(
 
             var grouped = records
                 .Where(r => r is not null)
-                .GroupBy(r => GetKey(r.Domain, r.Type))
+                .GroupBy(r => GetKey(r.Domain, r.Type), KeyComparer)
                 .ToDictionary(
                     g => g.Key,
                     // DnsRecord 是 record 类型，Distinct 直接按值语义去重
-                    g => g.Distinct().ToImmutableList());
+                    g => g.Distinct().ToImmutableList(),
+                    KeyComparer);
 
             _records.Clear();
             foreach (var (key, value) in grouped)
                 _records[key] = value;
+
+            RebuildIndexes();
 
             var totalCount = _records.Values.Sum(list => list.Count);
             logger.LogInformation("已从持久化存储加载 {Count} 条记录（已去重）", totalCount);
@@ -90,10 +97,14 @@ public sealed class CustomRecordStore(
                     return false;
 
                 if (_records.TryUpdate(key, existing.Add(record), existing))
+                {
+                    RegisterDomainRecord(record);
                     return true;
+                }
             }
             else if (_records.TryAdd(key, [record]))
             {
+                RegisterDomainRecord(record);
                 return true;
             }
             // CAS 失败说明有并发写入，重试
@@ -162,6 +173,7 @@ public sealed class CustomRecordStore(
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
         var queryName = domain.TrimEnd('.');
+        var normalizedQueryName = NormalizeDomain(queryName);
 
         // 1. 精确匹配
         if (_records.TryGetValue(GetKey(queryName, type), out var exact))
@@ -178,20 +190,13 @@ public sealed class CustomRecordStore(
             return wildcard;
         }
 
-        // 3. ANY 查询：返回该域名下所有类型的记录
-        if (type == DnsRecordType.ANY)
+        // 3. ANY 查询：通过域名二级索引返回，不扫描全部记录键
+        if (type == DnsRecordType.ANY
+            && _recordsByDomain.TryGetValue(normalizedQueryName, out var allRecords)
+            && !allRecords.IsEmpty)
         {
-            var prefix = $"{queryName.ToLowerInvariant()}:";
-            var allRecords = _records
-                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
-                .SelectMany(kvp => kvp.Value)
-                .ToList();
-
-            if (allRecords.Count > 0)
-            {
-                logger.LogDebug("命中自定义记录（ANY）: {Domain}", queryName);
-                return allRecords;
-            }
+            logger.LogDebug("命中自定义记录（ANY）: {Domain}", queryName);
+            return [.. allRecords];
         }
 
         logger.LogDebug("未找到自定义记录: {Domain} {Type}", queryName, type);
@@ -210,20 +215,17 @@ public sealed class CustomRecordStore(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
-        var queryName = domain.TrimEnd('.');
+        var queryName = NormalizeDomain(domain);
 
-        // 1. 精确匹配：逐个已知类型做 O(1) 字典查找
-        if (HasAnyType(queryName))
+        if (_domainIndex.ContainsKey(queryName))
             return true;
 
-        // 2. 泛域名匹配：与 FindWildcardMatch 保持同样的逐级放宽规则
-        var parts = queryName.Split('.');
-        if (parts.Length < 2)
-            return false;
-
-        for (var i = 0; i < parts.Length - 1; i++)
+        // 与 FindWildcardMatch 一样，从最具体的泛域名开始向宽泛后缀匹配。
+        // 通过 _domainIndex 判断，避免每个未命中查询都遍历全部记录类型。
+        for (var dot = queryName.IndexOf('.'); dot >= 0; dot = queryName.IndexOf('.', dot + 1))
         {
-            if (HasAnyType("*." + string.Join('.', parts.Skip(i + 1))))
+            var wildcardDomain = string.Concat("*".AsSpan(), queryName.AsSpan(dot));
+            if (_domainIndex.ContainsKey(wildcardDomain))
                 return true;
         }
 
@@ -263,21 +265,21 @@ public sealed class CustomRecordStore(
     /// </summary>
     private List<DnsRecord>? FindWildcardMatch(string domain, DnsRecordType type)
     {
-        var parts = domain.Split('.');
-
-        if (parts.Length < 2)
-            return null;
-
-        for (var i = 0; i < parts.Length - 1; i++)
+        // 逐级放宽，但直接定位点号，不再构造标签数组和重复 Join。
+        for (var dot = domain.IndexOf('.'); dot >= 0; dot = domain.IndexOf('.', dot + 1))
         {
-            var wildcardDomain = "*." + string.Join('.', parts.Skip(i + 1));
+            var wildcardDomain = string.Concat("*".AsSpan(), domain.AsSpan(dot));
 
             if (_records.TryGetValue(GetKey(wildcardDomain, type), out var records))
             {
                 logger.LogDebug("泛域名匹配: {Domain} -> {WildcardDomain}", domain, wildcardDomain);
 
                 // owner name 必须改写为客户端查询的名字
-                return [.. records.Select(r => r with { Domain = domain })];
+                var result = new List<DnsRecord>(records.Count);
+                foreach (var record in records)
+                    result.Add(record with { Domain = domain });
+
+                return result;
             }
         }
 
@@ -289,10 +291,13 @@ public sealed class CustomRecordStore(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
-        var removed = _records.TryRemove(GetKey(domain.TrimEnd('.'), type), out _);
+        var normalizedDomain = NormalizeDomain(domain);
+        var removed = _records.TryRemove(GetKey(normalizedDomain, type), out _);
 
         if (removed)
         {
+            RemoveDomainTypeFromIndex(normalizedDomain, type);
+            RemoveDomainIndexIfUnused(normalizedDomain);
             logger.LogInformation("已删除自定义记录: {Domain} {Type}", domain, type);
             await SaveToPersistenceAsync();
         }
@@ -306,7 +311,8 @@ public sealed class CustomRecordStore(
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
         ArgumentException.ThrowIfNullOrWhiteSpace(value);
 
-        var key = GetKey(domain.TrimEnd('.'), type);
+        var normalizedDomain = NormalizeDomain(domain);
+        var key = GetKey(normalizedDomain, type);
         const int MaxRetries = 100;
 
         for (var attempt = 0; attempt < MaxRetries; attempt++)
@@ -324,8 +330,10 @@ public sealed class CustomRecordStore(
             if (updated.IsEmpty)
             {
                 var pair = KeyValuePair.Create(key, existing);
-                if (((ICollection<KeyValuePair<string, ImmutableList<DnsRecord>>>)_records).Remove(pair))
+                if (((ICollection<KeyValuePair<RecordKey, ImmutableList<DnsRecord>>>)_records).Remove(pair))
                 {
+                    RemoveDomainRecordFromIndex(normalizedDomain, match);
+                    RemoveDomainIndexIfUnused(normalizedDomain);
                     logger.LogInformation("已删除自定义记录: {Domain} {Type} {Value}", domain, type, value);
                     await SaveToPersistenceAsync();
                     return true;
@@ -338,6 +346,7 @@ public sealed class CustomRecordStore(
 
             if (_records.TryUpdate(key, updated, existing))
             {
+                RemoveDomainRecordFromIndex(normalizedDomain, match);
                 logger.LogInformation("已删除自定义记录: {Domain} {Type} {Value}", domain, type, value);
                 await SaveToPersistenceAsync();
                 return true;
@@ -363,6 +372,8 @@ public sealed class CustomRecordStore(
     public async Task ClearAsync()
     {
         _records.Clear();
+        _domainIndex.Clear();
+        _recordsByDomain.Clear();
         logger.LogInformation("已清空所有自定义记录");
         await SaveToPersistenceAsync();
     }
@@ -377,6 +388,117 @@ public sealed class CustomRecordStore(
     /// <summary>记录总数</summary>
     public int Count => _records.Values.Sum(list => list.Count);
 
-    private static string GetKey(string domain, DnsRecordType type)
-        => $"{domain.ToLowerInvariant()}:{type}";
+    private static RecordKey GetKey(string domain, DnsRecordType type)
+        => new(domain, type);
+
+    private static string NormalizeDomain(string domain)
+        => domain.TrimEnd('.').ToLowerInvariant();
+
+    private void RegisterDomainRecord(DnsRecord record)
+    {
+        var normalizedDomain = NormalizeDomain(record.Domain);
+        _domainIndex.TryAdd(normalizedDomain, 0);
+
+        while (true)
+        {
+            if (_recordsByDomain.TryGetValue(normalizedDomain, out var existing))
+            {
+                if (existing.Contains(record)
+                    || _recordsByDomain.TryUpdate(normalizedDomain, existing.Add(record), existing))
+                {
+                    return;
+                }
+            }
+            else if (_recordsByDomain.TryAdd(normalizedDomain, [record]))
+            {
+                return;
+            }
+        }
+    }
+
+    private void RemoveDomainTypeFromIndex(string normalizedDomain, DnsRecordType type)
+    {
+        while (true)
+        {
+            if (!_recordsByDomain.TryGetValue(normalizedDomain, out var existing))
+                return;
+
+            var updated = existing.RemoveAll(r => r.Type == type);
+            if (updated.IsEmpty)
+            {
+                var pair = KeyValuePair.Create(normalizedDomain, existing);
+                if (((ICollection<KeyValuePair<string, ImmutableList<DnsRecord>>>)_recordsByDomain).Remove(pair))
+                    return;
+            }
+            else if (_recordsByDomain.TryUpdate(normalizedDomain, updated, existing))
+            {
+                return;
+            }
+        }
+    }
+
+    private void RemoveDomainRecordFromIndex(string normalizedDomain, DnsRecord record)
+    {
+        while (true)
+        {
+            if (!_recordsByDomain.TryGetValue(normalizedDomain, out var existing))
+                return;
+
+            var updated = existing.Remove(record);
+            if (updated.IsEmpty)
+            {
+                var pair = KeyValuePair.Create(normalizedDomain, existing);
+                if (((ICollection<KeyValuePair<string, ImmutableList<DnsRecord>>>)_recordsByDomain).Remove(pair))
+                    return;
+            }
+            else if (_recordsByDomain.TryUpdate(normalizedDomain, updated, existing))
+            {
+                return;
+            }
+        }
+    }
+
+    private void RemoveDomainIndexIfUnused(string normalizedDomain)
+    {
+        if (!HasAnyType(normalizedDomain))
+            _domainIndex.TryRemove(normalizedDomain, out _);
+    }
+
+    private void RebuildIndexes()
+    {
+        _domainIndex.Clear();
+        _recordsByDomain.Clear();
+
+        foreach (var record in _records.Values.SelectMany(records => records))
+        {
+            var normalizedDomain = NormalizeDomain(record.Domain);
+            _domainIndex.TryAdd(normalizedDomain, 0);
+            _recordsByDomain.AddOrUpdate(
+                normalizedDomain,
+                [record],
+                (_, existing) => existing.Contains(record) ? existing : existing.Add(record));
+        }
+    }
+
+    private readonly record struct RecordKey(string Domain, DnsRecordType Type);
+
+    private sealed class RecordKeyComparer : IEqualityComparer<RecordKey>
+    {
+        public bool Equals(RecordKey x, RecordKey y)
+            => x.Type == y.Type
+               && x.Domain.AsSpan().TrimEnd('.').Equals(
+                   y.Domain.AsSpan().TrimEnd('.'), StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode(RecordKey key)
+        {
+            var hash = new HashCode();
+            var domain = key.Domain.AsSpan().TrimEnd('.');
+
+            foreach (var c in domain)
+                hash.Add(char.ToLowerInvariant(c));
+
+            hash.Add((ushort)key.Type);
+            return hash.ToHashCode();
+        }
+    }
 }

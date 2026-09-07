@@ -69,6 +69,9 @@ bld/
 # Claude Code local settings
 .claude/settings.local.json
 
+# BenchmarkDotNet 输出
+BenchmarkDotNet.Artifacts/
+
 # Others
 appsettings.Development.json
 

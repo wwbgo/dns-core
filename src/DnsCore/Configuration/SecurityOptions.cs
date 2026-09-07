@@ -56,6 +56,12 @@ public sealed class DnsSecurityOptions
     /// <summary>同时处理的查询数上限，防止每包一个 Task 导致的资源耗尽</summary>
     public int MaxConcurrentQueries { get; set; } = 2048;
 
+    /// <summary>
+    /// UDP 固定 worker 数量。0 表示按 CPU 核心数自动计算。
+    /// 高并发场景可显式调大，但应避免超过线程池可承载范围。
+    /// </summary>
+    public int UdpWorkerCount { get; set; }
+
     /// <summary>TCP 并发连接数上限</summary>
     public int MaxConcurrentTcpConnections { get; set; } = 256;
 

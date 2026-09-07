@@ -1,4 +1,5 @@
 using DnsCore.Models;
+using System.Buffers;
 using System.Net;
 using System.Text;
 
@@ -8,30 +9,39 @@ namespace DnsCore.Protocol;
 /// DNS 线格式写入器：支持域名压缩（RFC 1035 §4.1.4）、
 /// 严格的 label/域名长度校验，以及各记录类型的 RDATA 编码。
 /// </summary>
-public sealed class DnsWriter
+public sealed class DnsWriter : IDisposable
 {
     private byte[] _buffer;
     private int _position;
+    private int _disposed;
 
     /// <summary>域名 -> 报文内偏移，用于生成压缩指针</summary>
     private readonly Dictionary<string, int> _nameOffsets = new(StringComparer.OrdinalIgnoreCase);
 
     public DnsWriter(int initialCapacity = 512)
-        => _buffer = new byte[Math.Max(initialCapacity, DnsHeader.Size)];
+        => _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, DnsHeader.Size));
 
     public int Position => _position;
 
     private void Ensure(int additional)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+
         var required = _position + additional;
         if (required <= _buffer.Length)
             return;
 
-        var newSize = Math.Max(_buffer.Length * 2, required);
-        Array.Resize(ref _buffer, Math.Min(newSize, DnsLimits.MaxMessageSize + 2));
+        var newSize = Math.Min(
+            Math.Max(_buffer.Length * 2, required),
+            DnsLimits.MaxMessageSize + 2);
 
-        if (_position + additional > _buffer.Length)
+        if (required > newSize)
             throw new InvalidOperationException("DNS 报文超出最大长度");
+
+        var replacement = ArrayPool<byte>.Shared.Rent(newSize);
+        _buffer.AsSpan(0, _position).CopyTo(replacement);
+        ArrayPool<byte>.Shared.Return(_buffer);
+        _buffer = replacement;
     }
 
     public void WriteByte(byte value)
@@ -100,13 +110,32 @@ public sealed class DnsWriter
         if (position < 0 || position > _position)
             throw new ArgumentOutOfRangeException(nameof(position));
 
-        foreach (var key in _nameOffsets.Where(kv => kv.Value >= position).Select(kv => kv.Key).ToList())
+        var stale = new List<string>();
+        foreach (var pair in _nameOffsets)
+        {
+            if (pair.Value >= position)
+                stale.Add(pair.Key);
+        }
+
+        foreach (var key in stale)
             _nameOffsets.Remove(key);
 
         _position = position;
     }
 
-    public byte[] ToArray() => _buffer.AsSpan(0, _position).ToArray();
+    public byte[] ToArray()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        return _buffer.AsSpan(0, _position).ToArray();
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        ArrayPool<byte>.Shared.Return(_buffer);
+    }
 
     // ==== 域名编码 ====
 
@@ -124,28 +153,76 @@ public sealed class DnsWriter
         var name = domain.TrimEnd('.');
         ValidateDomainName(name);
 
-        var labels = name.Split('.');
-
-        for (var i = 0; i < labels.Length; i++)
+        if (!useCompression)
         {
-            var suffix = string.Join('.', labels, i, labels.Length - i);
+            WriteUncompressedName(name);
+            return;
+        }
+
+        WriteCompressedName(name);
+    }
+
+    private void WriteUncompressedName(string name)
+    {
+        var remaining = name.AsSpan();
+
+        while (!remaining.IsEmpty)
+        {
+            var dot = remaining.IndexOf('.');
+            var label = dot < 0 ? remaining : remaining[..dot];
+            WriteAsciiLabel(label);
+
+            if (dot < 0)
+                break;
+
+            remaining = remaining[(dot + 1)..];
+        }
+
+        WriteByte(0);
+    }
+
+    private void WriteCompressedName(string name)
+    {
+        var nameSpan = name.AsSpan();
+        var labelStart = 0;
+
+        while (labelStart < nameSpan.Length)
+        {
+            var suffix = nameSpan[labelStart..].ToString();
 
             // 压缩指针只能表示 14 位偏移
-            if (useCompression && _nameOffsets.TryGetValue(suffix, out var offset) && offset <= 0x3FFF)
+            if (_nameOffsets.TryGetValue(suffix, out var offset) && offset <= 0x3FFF)
             {
                 WriteUInt16((ushort)(0xC000 | offset));
                 return;
             }
 
-            if (useCompression && _position <= 0x3FFF)
+            if (_position <= 0x3FFF)
                 _nameOffsets[suffix] = _position;
 
-            var labelBytes = Encoding.ASCII.GetBytes(labels[i]);
-            WriteByte((byte)labelBytes.Length);
-            WriteBytes(labelBytes);
+            var dot = nameSpan[labelStart..].IndexOf('.');
+            var label = dot < 0
+                ? nameSpan[labelStart..]
+                : nameSpan.Slice(labelStart, dot);
+
+            WriteAsciiLabel(label);
+
+            if (dot < 0)
+                break;
+
+            labelStart += dot + 1;
         }
 
         WriteByte(0);
+    }
+
+    private void WriteAsciiLabel(ReadOnlySpan<char> label)
+    {
+        Span<byte> bytes = stackalloc byte[DnsLimits.MaxLabelLength];
+        var count = Encoding.ASCII.GetBytes(label, bytes);
+
+        WriteByte((byte)count);
+        WriteBytes(bytes[..count]);
     }
 
     /// <summary>
@@ -159,25 +236,34 @@ public sealed class DnsWriter
     /// </param>
     public static void ValidateDomainName(string domain, bool strictCharset = false)
     {
-        var name = domain.TrimEnd('.');
-        if (name.Length == 0)
+        var remaining = domain.TrimEnd('.').AsSpan();
+        if (remaining.IsEmpty)
             return;
 
         var wireLength = 1; // 结尾的 0 字节
-        foreach (var label in name.Split('.'))
+
+        while (!remaining.IsEmpty)
         {
-            if (label.Length == 0)
+            var dot = remaining.IndexOf('.');
+            var label = dot < 0 ? remaining : remaining[..dot];
+
+            if (label.IsEmpty)
                 throw new ArgumentException($"域名含空 label: {domain}", nameof(domain));
 
             var byteCount = Encoding.ASCII.GetByteCount(label);
             if (byteCount > DnsLimits.MaxLabelLength)
                 throw new ArgumentException(
-                    $"域名 label 超长（{byteCount} > {DnsLimits.MaxLabelLength}）: {label}", nameof(domain));
+                    $"域名 label 超长（{byteCount} > {DnsLimits.MaxLabelLength}）: {label.ToString()}", nameof(domain));
 
             if (strictCharset)
                 ValidateLabelCharset(label, domain);
 
             wireLength += byteCount + 1;
+
+            if (dot < 0)
+                break;
+
+            remaining = remaining[(dot + 1)..];
         }
 
         if (wireLength > DnsLimits.MaxDomainNameLength)
@@ -190,7 +276,7 @@ public sealed class DnsWriter
     /// 拦掉引号、尖括号等字符：它们无法出现在合法主机名中，
     /// 却会被存入记录并回显到管理界面，构成注入载荷的来源。
     /// </summary>
-    private static void ValidateLabelCharset(string label, string domain)
+    private static void ValidateLabelCharset(ReadOnlySpan<char> label, string domain)
     {
         foreach (var c in label)
         {

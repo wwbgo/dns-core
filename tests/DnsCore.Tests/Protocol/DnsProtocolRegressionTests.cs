@@ -112,6 +112,18 @@ public class DnsProtocolRegressionTests
     }
 
     [Fact]
+    public void Parse_ShouldReject_WhenResourceRecordCountAbsurd()
+    {
+        var data = new byte[12];
+        data[5] = 0;      // QDCOUNT = 0
+        data[10] = 0;
+        data[11] = 17;    // ARCOUNT = 17
+
+        var act = () => DnsMessageParser.Parse(data);
+        act.Should().Throw<InvalidDataException>();
+    }
+
+    [Fact]
     public void Parse_ShouldReject_SelfReferencingCompressionPointer()
     {
         var data = new byte[16];
@@ -372,7 +384,7 @@ public class DnsProtocolRegressionTests
     public void ParseAndRebuild_ShouldRoundTrip_RealisticQueryWithEdns()
     {
         // 构造一个带 EDNS0 的真实查询，解析后再建响应，验证端到端一致
-        var writer = new DnsWriter(128);
+        using var writer = new DnsWriter(128);
         writer.WriteHeader(new DnsHeader
         {
             TransactionId = 0xABCD,

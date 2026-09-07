@@ -163,18 +163,24 @@ public sealed class SqliteRepository : IDnsRecordRepository, IDisposable
                     await deleteCommand.ExecuteNonQueryAsync();
                 }
 
-                // 插入新记录
+                // 插入新记录：复用一个预编译命令，批量导入时只更新参数
                 var insertSql = @"
                     INSERT INTO DnsRecords (Domain, Type, Value, TTL, Weight)
                     VALUES (@Domain, @Type, @Value, @TTL, @Weight)";
+                using var insertCommand = new SqliteCommand(insertSql, connection, transaction);
+                var domainParam = insertCommand.Parameters.Add("@Domain", SqliteType.Text);
+                var typeParam = insertCommand.Parameters.Add("@Type", SqliteType.Text);
+                var valueParam = insertCommand.Parameters.Add("@Value", SqliteType.Text);
+                var ttlParam = insertCommand.Parameters.Add("@TTL", SqliteType.Integer);
+                var weightParam = insertCommand.Parameters.Add("@Weight", SqliteType.Integer);
+
                 foreach (var record in records)
                 {
-                    using var insertCommand = new SqliteCommand(insertSql, connection, transaction);
-                    insertCommand.Parameters.AddWithValue("@Domain", record.Domain);
-                    insertCommand.Parameters.AddWithValue("@Type", record.Type.ToString());
-                    insertCommand.Parameters.AddWithValue("@Value", record.Value);
-                    insertCommand.Parameters.AddWithValue("@TTL", record.TTL);
-                    insertCommand.Parameters.AddWithValue("@Weight", record.Weight);
+                    domainParam.Value = record.Domain;
+                    typeParam.Value = record.Type.ToString();
+                    valueParam.Value = record.Value;
+                    ttlParam.Value = record.TTL;
+                    weightParam.Value = record.Weight;
                     await insertCommand.ExecuteNonQueryAsync();
                 }
 

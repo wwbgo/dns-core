@@ -12,17 +12,16 @@ public static class DnsRecordOrderer
     {
         ArgumentNullException.ThrowIfNull(records);
 
-        var copy = records.ToList();
-        if (copy.Count <= 1)
-            return copy;
+        if (records.Count <= 1)
+            return [.. records];
 
-        var normalized = ((offset % copy.Count) + copy.Count) % copy.Count;
-        if (normalized == 0)
-            return copy;
+        var normalized = ((offset % records.Count) + records.Count) % records.Count;
+        var rotated = new List<DnsRecord>(records.Count);
 
-        return copy.Skip(normalized)
-            .Concat(copy.Take(normalized))
-            .ToList();
+        for (var i = 0; i < records.Count; i++)
+            rotated.Add(records[(normalized + i) % records.Count]);
+
+        return rotated;
     }
 
     /// <summary>
@@ -32,14 +31,18 @@ public static class DnsRecordOrderer
     {
         ArgumentNullException.ThrowIfNull(records);
 
-        var copy = records.ToList();
-        if (copy.Count <= 1)
-            return copy;
+        if (records.Count <= 1)
+            return [.. records];
 
-        var firstWeight = EffectiveWeight(copy[0]);
-        return copy.All(r => EffectiveWeight(r) == firstWeight)
-            ? Rotate(copy, sequence)
-            : WeightedRoundRobin(copy, sequence);
+        var firstWeight = EffectiveWeight(records[0]);
+
+        for (var i = 1; i < records.Count; i++)
+        {
+            if (EffectiveWeight(records[i]) != firstWeight)
+                return WeightedRoundRobin(records, sequence);
+        }
+
+        return Rotate(records, sequence);
     }
 
     /// <summary>
@@ -49,14 +52,24 @@ public static class DnsRecordOrderer
     {
         ArgumentNullException.ThrowIfNull(records);
 
-        var copy = records.ToList();
-        if (copy.Count <= 1)
-            return copy;
+        var result = new List<DnsRecord>(records.Count);
+        for (var i = 0; i < records.Count; i++)
+            result.Add(records[i]);
 
-        var weights = copy.Select(EffectiveWeight).ToArray();
-        var totalWeight = weights.Sum();
+        if (result.Count <= 1)
+            return result;
+
+        var weights = new int[result.Count];
+        var totalWeight = 0;
+
+        for (var i = 0; i < result.Count; i++)
+        {
+            weights[i] = EffectiveWeight(result[i]);
+            totalWeight += weights[i];
+        }
+
         if (totalWeight <= 0)
-            return copy;
+            return result;
 
         var target = ((sequence % totalWeight) + totalWeight) % totalWeight;
         var selected = 0;
@@ -72,9 +85,12 @@ public static class DnsRecordOrderer
             }
         }
 
-        var ordered = new List<DnsRecord>(copy.Count) { copy[selected] };
-        ordered.AddRange(copy.Take(selected));
-        ordered.AddRange(copy.Skip(selected + 1));
+        var ordered = new List<DnsRecord>(result.Count) { result[selected] };
+        for (var i = 0; i < selected; i++)
+            ordered.Add(result[i]);
+        for (var i = selected + 1; i < result.Count; i++)
+            ordered.Add(result[i]);
+
         return ordered;
     }
 

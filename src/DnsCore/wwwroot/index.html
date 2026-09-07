@@ -374,13 +374,19 @@
                     </span>
                 </div>
 
-                <div class="search">
-                    <svg class="search__icon" aria-hidden="true"><use href="#i-search"/></svg>
-                    <input type="search" id="searchInput" placeholder="搜索域名、类型或记录值"
-                           autocomplete="off" aria-label="搜索记录">
-                    <button type="button" id="searchClear" class="search__clear" hidden aria-label="清除搜索">
-                        <svg aria-hidden="true"><use href="#i-x"/></svg>
-                    </button>
+                <div class="search-toolbar">
+                    <div class="search">
+                        <svg class="search__icon" aria-hidden="true"><use href="#i-search"/></svg>
+                        <input type="search" id="searchInput" placeholder="搜索域名、类型或记录值"
+                               autocomplete="off" aria-label="搜索记录">
+                        <button type="button" id="searchClear" class="search__clear" hidden aria-label="清除搜索">
+                            <svg aria-hidden="true"><use href="#i-x"/></svg>
+                        </button>
+                    </div>
+                    <label class="search-option">
+                        <input type="checkbox" id="exactSearch">
+                        <span>精确查询</span>
+                    </label>
                 </div>
 
                 <div class="table-wrap">

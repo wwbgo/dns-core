@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Threading.Channels;
 
 namespace DnsCore.Services;
 
@@ -23,6 +24,8 @@ public sealed class DnsServer(
     private UdpClient? _udpServer;
     private TcpListener? _tcpServer;
     private CancellationTokenSource? _cts;
+    private Channel<UdpWorkItem>? _udpChannel;
+    private Task[] _udpWorkerTasks = [];
     private int _roundRobinCounter;
 
     private readonly NetworkAcl _clientAcl = new(
@@ -30,8 +33,6 @@ public sealed class DnsServer(
 
     private readonly ClientRateLimiter _rateLimiter = new(options.Security.MaxQueriesPerSecondPerClient);
 
-    // 限制在飞的查询数：原实现对每个包无条件 Task.Run，小包洪泛即可耗尽线程池与内存
-    private readonly SemaphoreSlim _queryLimit = new(Math.Max(1, options.Security.MaxConcurrentQueries));
     private readonly SemaphoreSlim _tcpConnectionLimit = new(Math.Max(1, options.Security.MaxConcurrentTcpConnections));
 
     /// <summary>服务是否正在监听（供健康检查使用）</summary>
@@ -61,7 +62,20 @@ public sealed class DnsServer(
             logger.LogInformation("自定义记录数: {Count}", customRecordStore.Count);
             IsListening = true;
 
-            await Task.WhenAll(ListenUdpAsync(_cts.Token), ListenTcpAsync(_cts.Token));
+            _udpChannel = Channel.CreateBounded<UdpWorkItem>(new BoundedChannelOptions(
+                Math.Max(1, options.Security.MaxConcurrentQueries))
+            {
+                SingleWriter = true,
+                SingleReader = false,
+                FullMode = BoundedChannelFullMode.DropWrite,
+                AllowSynchronousContinuations = false
+            });
+            _udpWorkerTasks = StartUdpWorkers(_udpChannel.Reader, _cts.Token);
+
+            await Task.WhenAll(
+                ListenUdpAsync(_cts.Token),
+                ListenTcpAsync(_cts.Token),
+                Task.WhenAll(_udpWorkerTasks));
         }
         catch (Exception ex)
         {
@@ -143,50 +157,44 @@ public sealed class DnsServer(
     /// <summary>UDP 接收循环</summary>
     private async Task ListenUdpAsync(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            try
+            while (!cancellationToken.IsCancellationRequested)
             {
-                var result = await _udpServer!.ReceiveAsync(cancellationToken);
-
-                if (!ShouldAccept(result.RemoteEndPoint))
-                    continue;
-
-                // 有并发上限地处理，超限直接丢包（DNS 客户端本身会重试）
-                if (!await _queryLimit.WaitAsync(0, cancellationToken))
+                try
                 {
-                    logger.LogWarning("并发查询数达上限，丢弃来自 {Client} 的 UDP 查询", result.RemoteEndPoint);
-                    continue;
+                    var result = await _udpServer!.ReceiveAsync(cancellationToken);
+
+                    if (!ShouldAccept(result.RemoteEndPoint))
+                        continue;
+
+                    // channel 满时直接丢包，保持原有超限语义，但不再为每个包创建 Task
+                    if (!_udpChannel!.Writer.TryWrite(new UdpWorkItem(result.Buffer, result.RemoteEndPoint)))
+                    {
+                        logger.LogWarning("并发查询数达上限，丢弃来自 {Client} 的 UDP 查询", result.RemoteEndPoint);
+                    }
                 }
-
-                _ = Task.Run(async () =>
+                catch (OperationCanceledException)
                 {
-                    try
-                    {
-                        await ProcessUdpRequestAsync(result.Buffer, result.RemoteEndPoint, cancellationToken);
-                    }
-                    finally
-                    {
-                        _queryLimit.Release();
-                    }
-                }, cancellationToken);
+                    break;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+                catch (SocketException ex)
+                {
+                    logger.LogDebug(ex, "UDP 接收出现 socket 错误，继续监听");
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "接收 UDP DNS 请求时出错");
+                }
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
-            }
-            catch (SocketException ex)
-            {
-                logger.LogDebug(ex, "UDP 接收出现 socket 错误，继续监听");
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "接收 UDP DNS 请求时出错");
-            }
+        }
+        finally
+        {
+            _udpChannel?.Writer.TryComplete();
         }
     }
 
@@ -236,6 +244,37 @@ public sealed class DnsServer(
             {
                 logger.LogError(ex, "接受 TCP DNS 连接时出错");
             }
+        }
+    }
+
+    private Task[] StartUdpWorkers(ChannelReader<UdpWorkItem> reader, CancellationToken cancellationToken)
+    {
+        var configured = options.Security.UdpWorkerCount;
+        var workerCount = configured > 0
+            ? Math.Clamp(configured, 2, 128)
+            : Math.Clamp(Environment.ProcessorCount * 4, 2, 128);
+
+        return Enumerable.Range(0, workerCount)
+            .Select(_ => Task.Run(() => ProcessUdpWorkItemsAsync(reader, cancellationToken), CancellationToken.None))
+            .ToArray();
+    }
+
+    private async Task ProcessUdpWorkItemsAsync(
+        ChannelReader<UdpWorkItem> reader,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var item in reader.ReadAllAsync(cancellationToken))
+                await ProcessUdpRequestAsync(item.Buffer, item.RemoteEndPoint, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常停机
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "UDP worker 处理查询时出错");
         }
     }
 
@@ -361,12 +400,12 @@ public sealed class DnsServer(
                         continue;
                     }
 
-                    var framed = new byte[responseData.Length + 2];
-                    framed[0] = (byte)(responseData.Length >> 8);
-                    framed[1] = (byte)(responseData.Length & 0xFF);
-                    responseData.CopyTo(framed.AsSpan(2));
+                    // 复用读取长度前缀的缓冲区写回响应长度，避免每条响应额外分配 framed 数组
+                    lengthBuffer[0] = (byte)(responseData.Length >> 8);
+                    lengthBuffer[1] = (byte)(responseData.Length & 0xFF);
 
-                    await stream.WriteAsync(framed, token);
+                    await stream.WriteAsync(lengthBuffer, token);
+                    await stream.WriteAsync(responseData, token);
                     await stream.FlushAsync(token);
 
                     queriesServed++;
@@ -587,17 +626,15 @@ public sealed class DnsServer(
     private byte[] BuildResponse(
         DnsQuery query, List<DnsRecord> answers, DnsResponseCode code,
         bool isAuthoritative, int? maxResponseSize)
-        => DnsMessageParser.BuildResponse(new DnsResponseBuildRequest
-        {
-            Header = query.Header,
-            Questions = query.Questions,
-            Answers = answers,
-            ResponseCode = code,
-            IsAuthoritative = isAuthoritative,
-            MaxSize = maxResponseSize ?? query.MaxUdpResponseSize,
-            IncludeEdnsOpt = query.Edns is not null,
-            EdnsPayloadSize = DnsLimits.MaxEdnsPayloadSize
-        });
+        => DnsMessageParser.BuildResponse(
+            query.Header,
+            query.Questions,
+            answers,
+            code,
+            isAuthoritative,
+            maxResponseSize ?? query.MaxUdpResponseSize,
+            query.Edns is not null,
+            DnsLimits.MaxEdnsPayloadSize);
 
     private byte[] BuildErrorResponse(DnsQuery query, DnsResponseCode code, int? maxResponseSize)
         => BuildResponse(query, [], code, isAuthoritative: false, maxResponseSize);
@@ -736,4 +773,6 @@ public sealed class DnsServer(
                 span[i] = char.IsControl(source[i]) ? '?' : source[i];
         });
     }
+
+    private sealed record UdpWorkItem(byte[] Buffer, IPEndPoint RemoteEndPoint);
 }
