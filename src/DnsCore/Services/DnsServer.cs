@@ -3,9 +3,11 @@ using DnsCore.Models;
 using DnsCore.Protocol;
 using System.Buffers;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 
 namespace DnsCore.Services;
@@ -26,6 +28,8 @@ public sealed class DnsServer(
     private CancellationTokenSource? _cts;
     private Channel<UdpWorkItem>? _udpChannel;
     private Task[] _udpWorkerTasks = [];
+    private Task? _serverTask;
+    private int _stopRequested;
     private int _roundRobinCounter;
 
     private readonly NetworkAcl _clientAcl = new(
@@ -34,6 +38,8 @@ public sealed class DnsServer(
     private readonly ClientRateLimiter _rateLimiter = new(options.Security.MaxQueriesPerSecondPerClient);
 
     private readonly SemaphoreSlim _tcpConnectionLimit = new(Math.Max(1, options.Security.MaxConcurrentTcpConnections));
+    private readonly TaskCompletionSource<bool> _startupCompleted =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>服务是否正在监听（供健康检查使用）</summary>
     public bool IsListening { get; private set; }
@@ -43,46 +49,95 @@ public sealed class DnsServer(
     {
         try
         {
+            if (Volatile.Read(ref _stopRequested) != 0)
+                throw new OperationCanceledException("DNS server stop was requested");
+
             // 上游服务器列表；自定义记录已在应用启动阶段统一加载，此处不再重复添加
             upstreamResolver.SetUpstreamServers(options.UpstreamDnsServers);
 
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-            var listenAddress = ParseListenAddress(options.ListenAddress);
-
-            _udpServer = CreateUdpServer(listenAddress, options.Port);
-            logger.LogInformation("DNS UDP 监听已启动: {Address}:{Port}", listenAddress, options.Port);
-
-            _tcpServer = new TcpListener(listenAddress, options.Port);
-            if (listenAddress.Equals(IPAddress.IPv6Any))
-                _tcpServer.Server.DualMode = true;
-            _tcpServer.Start();
-            logger.LogInformation("DNS TCP 监听已启动: {Address}:{Port}", listenAddress, options.Port);
-
-            logger.LogInformation("自定义记录数: {Count}", customRecordStore.Count);
-            IsListening = true;
-
-            _udpChannel = Channel.CreateBounded<UdpWorkItem>(new BoundedChannelOptions(
-                Math.Max(1, options.Security.MaxConcurrentQueries))
+            try
             {
-                SingleWriter = true,
-                SingleReader = false,
-                FullMode = BoundedChannelFullMode.DropWrite,
-                AllowSynchronousContinuations = false
-            });
-            _udpWorkerTasks = StartUdpWorkers(_udpChannel.Reader, _cts.Token);
+                var listenAddress = ParseListenAddress(options.ListenAddress);
 
-            await Task.WhenAll(
-                ListenUdpAsync(_cts.Token),
-                ListenTcpAsync(_cts.Token),
-                Task.WhenAll(_udpWorkerTasks));
+                _udpServer = CreateUdpServer(listenAddress, options.Port);
+                logger.LogInformation("DNS UDP listener started: {Address}:{Port}", listenAddress, options.Port);
+
+                _tcpServer = new TcpListener(listenAddress, options.Port);
+                if (listenAddress.Equals(IPAddress.IPv6Any))
+                    _tcpServer.Server.DualMode = true;
+                _tcpServer.Start();
+                logger.LogInformation("DNS TCP listener started: {Address}:{Port}", listenAddress, options.Port);
+
+                logger.LogInformation("Custom record count: {Count}", customRecordStore.Count);
+                IsListening = true;
+
+                _udpChannel = Channel.CreateBounded<UdpWorkItem>(new BoundedChannelOptions(
+                    Math.Max(1, options.Security.MaxConcurrentQueries))
+                {
+                    SingleWriter = true,
+                    SingleReader = false,
+                    FullMode = BoundedChannelFullMode.DropWrite,
+                    AllowSynchronousContinuations = false
+                });
+                _udpWorkerTasks = StartUdpWorkers(_udpChannel.Reader, _cts.Token);
+
+                _serverTask = Task.WhenAll(
+                    ListenUdpAsync(_cts.Token),
+                    ListenTcpAsync(_cts.Token),
+                    Task.WhenAll(_udpWorkerTasks));
+
+                _startupCompleted.TrySetResult(true);
+            }
+            catch (Exception ex)
+            {
+                _startupCompleted.TrySetException(ex);
+                DisposeServerResources();
+                throw;
+            }
+
+            await _serverTask;
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+        {
+            IsListening = false;
+            DisposeServerResources();
+            logger.LogInformation("DNS server startup was canceled");
+            throw;
         }
         catch (Exception ex)
         {
             IsListening = false;
-            logger.LogError(ex, "DNS 服务器启动失败");
+            DisposeServerResources();
+            logger.LogError(ex, "DNS server failed to start");
             throw;
         }
+    }
+
+    internal static bool TryParseStrictIp(string value, out IPAddress address)
+    {
+        address = IPAddress.None;
+
+        if (!IPAddress.TryParse(value, out var parsed))
+            return false;
+
+        if (parsed.AddressFamily == AddressFamily.InterNetwork)
+        {
+            var parts = value.Split('.');
+            if (parts.Length != 4)
+                return false;
+
+            foreach (var part in parts)
+            {
+                if (part.Length == 0 || part.Length > 3 || !byte.TryParse(part, out _))
+                    return false;
+            }
+        }
+
+        address = parsed;
+        return true;
     }
 
     private static IPAddress ParseListenAddress(string address)
@@ -114,7 +169,7 @@ public sealed class DnsServer(
             }
             catch (Exception ex)
             {
-                logger.LogDebug(ex, "设置 SIO_UDP_CONNRESET 失败（可忽略）");
+                logger.LogDebug(ex, "Failed to set SIO_UDP_CONNRESET (ignored)");
             }
         }
 
@@ -129,7 +184,7 @@ public sealed class DnsServer(
         }
         catch (SocketException ex)
         {
-            logger.LogDebug(ex, "设置 UDP socket 缓冲大小失败，使用系统默认值");
+            logger.LogDebug(ex, "Failed to set UDP socket buffer size; using system defaults");
         }
 
         udpClient.Client.Bind(new IPEndPoint(listenAddress, port));
@@ -137,21 +192,89 @@ public sealed class DnsServer(
     }
 
     /// <summary>停止 DNS 服务器</summary>
-    public void Stop()
+    public async Task StopAsync(CancellationToken cancellationToken = default)
     {
-        logger.LogInformation("正在停止 DNS 服务器...");
+        logger.LogInformation("Stopping DNS server...");
         IsListening = false;
+        Interlocked.Exchange(ref _stopRequested, 1);
 
         try { _cts?.Cancel(); } catch (ObjectDisposedException) { }
 
-        _udpServer?.Dispose();
-        _tcpServer?.Stop();
-        _tcpServer?.Dispose();
+        try
+        {
+            await _startupCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException)
+        {
+            logger.LogWarning("Timed out waiting for DNS server startup to complete; continuing shutdown");
+        }
+        catch
+        {
+            // 启动失败已经由 StartAsync 处理，这里继续释放可能已创建的资源。
+        }
 
-        _cts?.Dispose();
+        // 先通知接收循环与 worker 退出，再关闭 socket；否则正在发送应答的 worker
+        // 会访问已释放的 UdpClient，重启时表现为 ObjectDisposedException。
+        _udpChannel?.Writer.TryComplete();
+
+        Exception? serverFault = null;
+        try
+        {
+            if (_serverTask is not null)
+            {
+                try
+                {
+                    await _serverTask.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    // 正常停机。
+                }
+                catch (TimeoutException)
+                {
+                    logger.LogWarning("Timed out waiting for DNS server workers; forcing socket disposal");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            serverFault = ex;
+        }
+        finally
+        {
+            DisposeServerResources();
+        }
+
+        logger.LogInformation("DNS server stopped");
+
+        if (serverFault is not null)
+            ExceptionDispatchInfo.Capture(serverFault).Throw();
+    }
+
+    /// <summary>停止 DNS 服务器（同步版本，保持测试与旧调用兼容）</summary>
+    public void Stop()
+        => StopAsync().GetAwaiter().GetResult();
+
+    private void DisposeServerResources()
+    {
+        try { _udpServer?.Dispose(); } catch (ObjectDisposedException) { }
+
+        try
+        {
+            _tcpServer?.Stop();
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
+        {
+            logger.LogDebug(ex, "TCP listener socket was already closed while stopping");
+        }
+
+        try { _tcpServer?.Dispose(); } catch (ObjectDisposedException) { }
+        try { _cts?.Dispose(); } catch (ObjectDisposedException) { }
+
+        _udpServer = null;
+        _tcpServer = null;
         _cts = null;
-
-        logger.LogInformation("DNS 服务器已停止");
+        _serverTask = null;
     }
 
     /// <summary>UDP 接收循环</summary>
@@ -171,7 +294,7 @@ public sealed class DnsServer(
                     // channel 满时直接丢包，保持原有超限语义，但不再为每个包创建 Task
                     if (!_udpChannel!.Writer.TryWrite(new UdpWorkItem(result.Buffer, result.RemoteEndPoint)))
                     {
-                        logger.LogWarning("并发查询数达上限，丢弃来自 {Client} 的 UDP 查询", result.RemoteEndPoint);
+                        logger.LogWarning("Concurrent query limit reached; dropping UDP query from {Client}", result.RemoteEndPoint);
                     }
                 }
                 catch (OperationCanceledException)
@@ -184,11 +307,11 @@ public sealed class DnsServer(
                 }
                 catch (SocketException ex)
                 {
-                    logger.LogDebug(ex, "UDP 接收出现 socket 错误，继续监听");
+                    logger.LogDebug(ex, "UDP receive socket error; continuing to listen");
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "接收 UDP DNS 请求时出错");
+                    logger.LogError(ex, "Failed to receive UDP DNS request");
                 }
             }
         }
@@ -215,7 +338,7 @@ public sealed class DnsServer(
 
                 if (!await _tcpConnectionLimit.WaitAsync(0, cancellationToken))
                 {
-                    logger.LogWarning("TCP 连接数达上限，拒绝来自 {Client} 的连接", client.Client.RemoteEndPoint);
+                    logger.LogWarning("TCP connection limit reached; rejecting connection from {Client}", client.Client.RemoteEndPoint);
                     client.Dispose();
                     continue;
                 }
@@ -242,7 +365,7 @@ public sealed class DnsServer(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "接受 TCP DNS 连接时出错");
+                logger.LogError(ex, "Failed to accept TCP DNS connection");
             }
         }
     }
@@ -274,7 +397,7 @@ public sealed class DnsServer(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "UDP worker 处理查询时出错");
+            logger.LogError(ex, "UDP worker failed while processing a query");
         }
     }
 
@@ -286,13 +409,13 @@ public sealed class DnsServer(
 
         if (!_clientAcl.IsAllowed(endpoint.Address))
         {
-            logger.LogDebug("拒绝不在允许网段内的客户端: {Client}", endpoint.Address);
+            logger.LogDebug("Rejected client outside allowed networks: {Client}", endpoint.Address);
             return false;
         }
 
         if (!_rateLimiter.TryAcquire(endpoint.Address))
         {
-            logger.LogDebug("客户端触发限流: {Client}", endpoint.Address);
+            logger.LogDebug("Client rate limit triggered: {Client}", endpoint.Address);
             return false;
         }
 
@@ -342,12 +465,12 @@ public sealed class DnsServer(
                             // 客户端正常关闭连接（在查询边界）
                             if (lenRead == 0)
                             {
-                                logger.LogDebug("TCP 客户端 {Client} 正常关闭连接，已服务 {Count} 个查询",
+                                logger.LogDebug("TCP client {Client} closed connection normally; served {Count} queries",
                                     clientEndpoint, queriesServed);
                                 return;
                             }
                             // 读到一半就断开，协议违规
-                            logger.LogWarning("TCP 客户端 {Client} 在长度字段读取中途断开", clientEndpoint);
+                            logger.LogWarning("TCP client {Client} disconnected while reading length prefix", clientEndpoint);
                             return;
                         }
                         lenRead += n;
@@ -359,7 +482,7 @@ public sealed class DnsServer(
                     // 0 会让后续逻辑空转，超大值会让每连接白占缓冲
                     if (messageLength < DnsHeader.Size || messageLength > DnsLimits.MaxMessageSize)
                     {
-                        logger.LogWarning("TCP DNS 报文长度非法({Length})，来自 {Client}，断开连接",
+                        logger.LogWarning("Invalid TCP DNS message length ({Length}) from {Client}; disconnecting",
                             messageLength, clientEndpoint);
                         return;
                     }
@@ -380,13 +503,13 @@ public sealed class DnsServer(
                             requestBuffer.AsMemory(bodyRead, messageLength - bodyRead), token);
                         if (n == 0)
                         {
-                            logger.LogWarning("TCP 客户端 {Client} 在报文读取中途断开", clientEndpoint);
+                            logger.LogWarning("TCP client {Client} disconnected while reading message body", clientEndpoint);
                             return;
                         }
                         bodyRead += n;
                     }
 
-                    logger.LogDebug("收到 TCP DNS 查询，长度 {Length} 字节，来自 {Client}",
+                    logger.LogDebug("Received TCP DNS query, {Length} bytes, from {Client}",
                         messageLength, clientEndpoint);
 
                     var responseData = await ProcessDnsQueryAsync(
@@ -413,26 +536,26 @@ public sealed class DnsServer(
 
                 if (queriesServed >= MaxQueriesPerConnection)
                 {
-                    logger.LogDebug("TCP 连接 {Client} 达到最大查询数 {Max}，主动关闭",
+                    logger.LogDebug("TCP connection {Client} reached max query count {Max}; closing",
                         clientEndpoint, MaxQueriesPerConnection);
                 }
             }
         }
         catch (OperationCanceledException)
         {
-            logger.LogDebug("TCP DNS 连接 {Client} 超时或被取消", clientEndpoint);
+            logger.LogDebug("TCP DNS connection {Client} timed out or was canceled", clientEndpoint);
         }
         catch (EndOfStreamException)
         {
-            logger.LogDebug("TCP DNS 连接 {Client} 在读取完整报文前关闭", clientEndpoint);
+            logger.LogDebug("TCP DNS connection {Client} closed before the full message was read", clientEndpoint);
         }
         catch (IOException ex)
         {
-            logger.LogDebug(ex, "TCP DNS 连接 {Client} IO 错误", clientEndpoint);
+            logger.LogDebug(ex, "TCP DNS connection {Client} I/O error", clientEndpoint);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "处理 TCP DNS 请求时出错，客户端 {Client}", clientEndpoint);
+            logger.LogError(ex, "Failed to process TCP DNS request from client {Client}", clientEndpoint);
         }
         finally
         {
@@ -457,9 +580,13 @@ public sealed class DnsServer(
         {
             // 正常停机
         }
+        catch (ObjectDisposedException)
+        {
+            // StopAsync 超时后强制释放 socket 时，仍可能有 worker 正在发送应答。
+        }
         catch (Exception ex)
         {
-            logger.LogError(ex, "处理 UDP DNS 请求时出错");
+            logger.LogError(ex, "Failed to process UDP DNS request");
         }
     }
 
@@ -480,7 +607,7 @@ public sealed class DnsServer(
         catch (InvalidDataException ex)
         {
             // 畸形报文属于预期输入：记 Debug 并静默丢弃，不打 Error 日志刷屏
-            logger.LogDebug(ex, "收到畸形 DNS 报文({Protocol})，来自 {Client}", protocol, clientEndpoint);
+            logger.LogDebug(ex, "Received malformed DNS message ({Protocol}) from {Client}", protocol, clientEndpoint);
             return null;
         }
 
@@ -500,14 +627,14 @@ public sealed class DnsServer(
 
             if (query.Questions.Count == 0)
             {
-                logger.LogDebug("DNS 请求无 question 区({Protocol})", protocol);
+                logger.LogDebug("DNS request has no question section ({Protocol})", protocol);
                 return BuildErrorResponse(query, DnsResponseCode.FormErr, maxResponseSize);
             }
 
             // 只支持标准查询（Opcode 0）
             if (header.Opcode != 0)
             {
-                logger.LogDebug("不支持的 Opcode {Opcode}({Protocol})", header.Opcode, protocol);
+                logger.LogDebug("Unsupported opcode {Opcode} ({Protocol})", header.Opcode, protocol);
                 return BuildErrorResponse(query, DnsResponseCode.NotImp, maxResponseSize);
             }
 
@@ -516,7 +643,7 @@ public sealed class DnsServer(
             if (options.LogEveryQuery)
             {
                 // 域名来自不可信输入，转义后再记录，避免日志注入
-                logger.LogInformation("收到 DNS 查询({Protocol}): {Domain} {Type} 来自 {Client}",
+                logger.LogInformation("Received DNS query ({Protocol}): {Domain} {Type} from {Client}",
                     protocol, Sanitize(question.Name), question.Type, clientEndpoint);
             }
 
@@ -526,7 +653,7 @@ public sealed class DnsServer(
                 var ptrAnswer = TryBuildServerPtrResponse(question.Name);
                 if (ptrAnswer is not null)
                 {
-                    logger.LogDebug("以服务器主机名应答 PTR 查询({Protocol}): {Domain} → {Hostname}",
+                    logger.LogDebug("Answered PTR query with server hostname ({Protocol}): {Domain} -> {Hostname}",
                         protocol, Sanitize(question.Name), options.Hostname);
 
                     return BuildResponse(query, new List<DnsRecord> { ptrAnswer },
@@ -539,7 +666,7 @@ public sealed class DnsServer(
 
             if (customAnswers is { Count: > 0 })
             {
-                logger.LogDebug("以自定义记录应答({Protocol}): {Domain} {Type}",
+                logger.LogDebug("Answered with custom record ({Protocol}): {Domain} {Type}",
                     protocol, Sanitize(question.Name), question.Type);
 
                 var orderedAnswers = OrderForRoundRobin(customAnswers);
@@ -555,17 +682,28 @@ public sealed class DnsServer(
             // 每次固定卡 2 秒（上游超时时长），关闭上游转发反而"变快"。
             if (customRecordStore.ContainsDomain(question.Name))
             {
-                logger.LogDebug("域名存在但无此类型记录，返回 NODATA({Protocol}): {Domain} {Type}",
+                logger.LogDebug("Domain exists but no record of this type; returning NODATA ({Protocol}): {Domain} {Type}",
                     protocol, Sanitize(question.Name), question.Type);
 
                 return BuildResponse(query, [], DnsResponseCode.NoError,
                     isAuthoritative: true, maxResponseSize);
             }
 
+            // 私网/链路本地反向解析没有公共上游可查，转发只会让 nslookup 这类工具
+            // 每次启动都先卡一个超时。这里直接返回本地 NODATA。
+            if (question.Type == DnsRecordType.PTR && IsPrivateReverseLookup(question.Name))
+            {
+                logger.LogDebug("Private reverse PTR query returned NODATA locally ({Protocol}): {Domain}",
+                    protocol, Sanitize(question.Name));
+
+                return BuildResponse(query, [], DnsResponseCode.NoError,
+                    isAuthoritative: false, maxResponseSize);
+            }
+
             // 3. 自定义记录未命中且未启用上游：返回 SERVFAIL 让客户端换服务器
             if (!options.EnableUpstreamDnsQuery)
             {
-                logger.LogDebug("未命中自定义记录且上游查询已禁用，返回 SERVFAIL({Protocol}): {Domain}",
+                logger.LogDebug("Custom record missed and upstream query disabled; returning SERVFAIL ({Protocol}): {Domain}",
                     protocol, Sanitize(question.Name));
 
                 return BuildErrorResponse(query, DnsResponseCode.ServFail, maxResponseSize);
@@ -579,7 +717,7 @@ public sealed class DnsServer(
             // 原实现返回 NXDOMAIN，等于谎称域名不存在，会被客户端负缓存。
             if (upstream is null)
             {
-                logger.LogDebug("上游查询失败，返回 SERVFAIL({Protocol}): {Domain}",
+                logger.LogDebug("Upstream query failed; returning SERVFAIL ({Protocol}): {Domain}",
                     protocol, Sanitize(question.Name));
 
                 return BuildErrorResponse(query, DnsResponseCode.ServFail, maxResponseSize);
@@ -598,7 +736,7 @@ public sealed class DnsServer(
         {
             // question 现在声明在 try 内，catch 作用域不可见；从 query 安全取用于日志
             var domain = query.Questions.Count > 0 ? Sanitize(query.Questions[0].Name) : "(无 question)";
-            logger.LogError(ex, "处理 DNS 查询出错({Protocol}): {Domain}", protocol, domain);
+            logger.LogError(ex, "Failed to process DNS query ({Protocol}): {Domain}", protocol, domain);
             return BuildErrorResponse(query, DnsResponseCode.ServFail, maxResponseSize);
         }
         finally
@@ -645,68 +783,14 @@ public sealed class DnsServer(
     /// </summary>
     private DnsRecord? TryBuildServerPtrResponse(string ptrQuery)
     {
-        // PTR 查询格式：IPv4 为 "90.100.168.192.in-addr.arpa"，IPv6 为 "x.x.x...ip6.arpa"
-        // 需要反向解析出 IP，检查是否是服务器监听的地址
-
-        IPAddress? queryIp = null;
-
-        // 解析 IPv4 PTR 查询
-        if (ptrQuery.EndsWith(".in-addr.arpa", StringComparison.OrdinalIgnoreCase))
-        {
-            var prefix = ptrQuery[..^13]; // 去掉 ".in-addr.arpa"
-            var octets = prefix.Split('.');
-            if (octets.Length == 4 && octets.All(o => byte.TryParse(o, out _)))
-            {
-                // PTR 查询中 IP 是反向的，需要翻转
-                Array.Reverse(octets);
-                if (IPAddress.TryParse(string.Join('.', octets), out var ip))
-                    queryIp = ip;
-            }
-        }
-        // 解析 IPv6 PTR 查询：每个十六进制位一个标签，逆序
-        // 例如 ::1 → 1.0.0.0.(...共32个半字节...).ip6.arpa
-        else if (ptrQuery.EndsWith(".ip6.arpa", StringComparison.OrdinalIgnoreCase))
-        {
-            var nibbles = ptrQuery[..^9].Split('.');
-            if (nibbles.Length != 32)
-                return null;
-
-            // 逆序还原成 32 个十六进制字符，再按 4 个一组组成 8 段
-            Span<char> hex = stackalloc char[32];
-            for (var i = 0; i < 32; i++)
-            {
-                var nibble = nibbles[31 - i];
-                if (nibble.Length != 1 || !Uri.IsHexDigit(nibble[0]))
-                    return null;
-                hex[i] = nibble[0];
-            }
-
-            Span<char> text = stackalloc char[39]; // 8 段 × 4 字符 + 7 个冒号
-            var pos = 0;
-            for (var seg = 0; seg < 8; seg++)
-            {
-                if (seg > 0)
-                    text[pos++] = ':';
-                hex.Slice(seg * 4, 4).CopyTo(text[pos..]);
-                pos += 4;
-            }
-
-            if (IPAddress.TryParse(text[..pos], out var ip6))
-                queryIp = ip6;
-        }
-        else
-        {
-            return null;
-        }
-
-        if (queryIp is null)
+        if (!TryParsePtrAddress(ptrQuery, out var queryIp))
             return null;
 
         // 检查是否是服务器监听的地址
         // ListenAddress 可能是 "::" (所有), "0.0.0.0" (所有IPv4), 或具体 IP
         var listenAddr = options.ListenAddress;
 
-        bool isServerIp = false;
+        var isServerIp = false;
 
         if (listenAddr == "::" || listenAddr == "0.0.0.0")
         {
@@ -714,9 +798,22 @@ public sealed class DnsServer(
             // 简化处理：只要是查本机 IP 的 PTR，都返回主机名
             isServerIp = IsLocalAddress(queryIp);
         }
-        else if (IPAddress.TryParse(listenAddr, out var specificIp))
+        else if (TryParseStrictIp(listenAddr, out var specificIp))
         {
             isServerIp = queryIp.Equals(specificIp);
+        }
+
+        if (!isServerIp)
+        {
+            foreach (var configured in options.PtrHostAddresses ?? [])
+            {
+                if (TryParseStrictIp(configured.Trim(), out var configuredIp)
+                    && queryIp.Equals(configuredIp))
+                {
+                    isServerIp = true;
+                    break;
+                }
+            }
         }
 
         if (!isServerIp)
@@ -730,6 +827,76 @@ public sealed class DnsServer(
             Value = options.Hostname!,
             TTL = 3600
         };
+    }
+
+    private static bool TryParsePtrAddress(
+        string ptrQuery,
+        [NotNullWhen(true)] out IPAddress? address)
+    {
+        address = null;
+
+        // 解析 IPv4 PTR 查询，例如 60.50.168.192.in-addr.arpa -> 192.168.50.60
+        if (ptrQuery.EndsWith(".in-addr.arpa", StringComparison.OrdinalIgnoreCase))
+        {
+            var prefix = ptrQuery[..^13];
+            var octets = prefix.Split('.');
+            if (octets.Length != 4 || !octets.All(o => byte.TryParse(o, out _)))
+                return false;
+
+            Array.Reverse(octets);
+            return IPAddress.TryParse(string.Join('.', octets), out address);
+        }
+
+        // 解析 IPv6 PTR 查询：32 个半字节，逆序还原。
+        if (ptrQuery.EndsWith(".ip6.arpa", StringComparison.OrdinalIgnoreCase))
+        {
+            var nibbles = ptrQuery[..^9].Split('.');
+            if (nibbles.Length != 32)
+                return false;
+
+            Span<char> hex = stackalloc char[32];
+            for (var i = 0; i < 32; i++)
+            {
+                var nibble = nibbles[31 - i];
+                if (nibble.Length != 1 || !Uri.IsHexDigit(nibble[0]))
+                    return false;
+                hex[i] = nibble[0];
+            }
+
+            Span<char> text = stackalloc char[39];
+            var pos = 0;
+            for (var seg = 0; seg < 8; seg++)
+            {
+                if (seg > 0)
+                    text[pos++] = ':';
+                hex.Slice(seg * 4, 4).CopyTo(text[pos..]);
+                pos += 4;
+            }
+
+            return IPAddress.TryParse(text[..pos], out address);
+        }
+
+        return false;
+    }
+
+    internal static bool IsPrivateReverseLookup(string ptrQuery)
+    {
+        if (!TryParsePtrAddress(ptrQuery, out var address) || address is null)
+            return false;
+
+        var ip = address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+        if (IPAddress.IsLoopback(ip))
+            return true;
+
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal;
+
+        var bytes = ip.GetAddressBytes();
+        return bytes.Length == 4
+            && (bytes[0] == 10
+                || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31)
+                || (bytes[0] == 192 && bytes[1] == 168)
+                || (bytes[0] == 169 && bytes[1] == 254));
     }
 
     // 本机地址集合。启动时枚举一次并缓存：

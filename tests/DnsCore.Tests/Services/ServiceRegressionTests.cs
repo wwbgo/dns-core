@@ -206,6 +206,27 @@ public class ServiceRegressionTests
         store.ContainsDomain("test.ccx").Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData("60.50.168.192.in-addr.arpa", true)]
+    [InlineData("1.0.0.10.in-addr.arpa", true)]
+    [InlineData("1.0.16.172.in-addr.arpa", true)]
+    [InlineData("8.8.8.8.in-addr.arpa", false)]
+    public void DnsServer_ShouldTreatPrivateReverseZonesAsLocal(string ptrName, bool expected)
+    {
+        DnsServer.IsPrivateReverseLookup(ptrName).Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("192.168.50.60", true)]
+    [InlineData("192.168.50", false)]
+    [InlineData("10.1", false)]
+    [InlineData("1", false)]
+    [InlineData("::1", true)]
+    public void DnsServer_ShouldRejectInetAtonShorthandForPtrAddresses(string value, bool expected)
+    {
+        DnsServer.TryParseStrictIp(value, out var address).Should().Be(expected);
+    }
+
     [Fact]
     public void Store_ShouldPreferExactMatch_OverWildcard()
     {

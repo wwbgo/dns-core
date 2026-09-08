@@ -26,7 +26,7 @@ public sealed class CustomRecordStore(
     {
         if (repository is null)
         {
-            logger.LogDebug("未配置持久化存储，跳过加载");
+            logger.LogDebug("No persistence repository configured; skipping load");
             return;
         }
 
@@ -50,11 +50,11 @@ public sealed class CustomRecordStore(
             RebuildIndexes();
 
             var totalCount = _records.Values.Sum(list => list.Count);
-            logger.LogInformation("已从持久化存储加载 {Count} 条记录（已去重）", totalCount);
+            logger.LogInformation("Loaded {Count} records from persistence storage (deduplicated)", totalCount);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "从持久化存储加载记录失败");
+            logger.LogError(ex, "Failed to load records from persistence storage");
         }
     }
 
@@ -69,11 +69,11 @@ public sealed class CustomRecordStore(
         {
             var allRecords = GetAllRecords().ToList();
             await repository.SaveAllAsync(allRecords);
-            logger.LogDebug("已保存 {Count} 条记录到持久化存储", allRecords.Count);
+            logger.LogDebug("Saved {Count} records to persistence storage", allRecords.Count);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "保存记录到持久化存储失败");
+            logger.LogError(ex, "Failed to save records to persistence storage");
         }
         finally
         {
@@ -118,12 +118,12 @@ public sealed class CustomRecordStore(
 
         if (TryInsert(record))
         {
-            logger.LogInformation("已添加自定义记录: {Record}", record);
+            logger.LogInformation("Added custom record: {Record}", record);
             await SaveToPersistenceAsync();
         }
         else
         {
-            logger.LogDebug("记录已存在，跳过: {Record}", record);
+            logger.LogDebug("Record already exists; skipped: {Record}", record);
         }
     }
 
@@ -147,14 +147,14 @@ public sealed class CustomRecordStore(
 
             if (TryInsert(record))
             {
-                logger.LogDebug("已添加自定义记录: {Record}", record);
+                logger.LogDebug("Added custom record: {Record}", record);
                 addedCount++;
             }
         }
 
         if (addedCount > 0)
         {
-            logger.LogInformation("已批量添加 {Count} 条自定义记录", addedCount);
+            logger.LogInformation("Added {Count} custom records in batch", addedCount);
             await SaveToPersistenceAsync();
         }
     }
@@ -178,7 +178,7 @@ public sealed class CustomRecordStore(
         // 1. 精确匹配
         if (_records.TryGetValue(GetKey(queryName, type), out var exact))
         {
-            logger.LogDebug("命中自定义记录（精确匹配）: {Domain} {Type}", queryName, type);
+            logger.LogDebug("Custom record matched exactly: {Domain} {Type}", queryName, type);
             return [.. exact];
         }
 
@@ -186,7 +186,7 @@ public sealed class CustomRecordStore(
         var wildcard = FindWildcardMatch(queryName, type);
         if (wildcard is not null)
         {
-            logger.LogDebug("命中自定义记录（泛域名匹配）: {Domain} {Type}", queryName, type);
+            logger.LogDebug("Custom record matched by wildcard: {Domain} {Type}", queryName, type);
             return wildcard;
         }
 
@@ -195,11 +195,11 @@ public sealed class CustomRecordStore(
             && _recordsByDomain.TryGetValue(normalizedQueryName, out var allRecords)
             && !allRecords.IsEmpty)
         {
-            logger.LogDebug("命中自定义记录（ANY）: {Domain}", queryName);
+            logger.LogDebug("Custom record matched ANY query: {Domain}", queryName);
             return [.. allRecords];
         }
 
-        logger.LogDebug("未找到自定义记录: {Domain} {Type}", queryName, type);
+        logger.LogDebug("Custom record not found: {Domain} {Type}", queryName, type);
         return null;
     }
 
@@ -272,7 +272,7 @@ public sealed class CustomRecordStore(
 
             if (_records.TryGetValue(GetKey(wildcardDomain, type), out var records))
             {
-                logger.LogDebug("泛域名匹配: {Domain} -> {WildcardDomain}", domain, wildcardDomain);
+                logger.LogDebug("Wildcard match: {Domain} -> {WildcardDomain}", domain, wildcardDomain);
 
                 // owner name 必须改写为客户端查询的名字
                 var result = new List<DnsRecord>(records.Count);
@@ -298,7 +298,7 @@ public sealed class CustomRecordStore(
         {
             RemoveDomainTypeFromIndex(normalizedDomain, type);
             RemoveDomainIndexIfUnused(normalizedDomain);
-            logger.LogInformation("已删除自定义记录: {Domain} {Type}", domain, type);
+            logger.LogInformation("Deleted custom record: {Domain} {Type}", domain, type);
             await SaveToPersistenceAsync();
         }
 
@@ -334,7 +334,7 @@ public sealed class CustomRecordStore(
                 {
                     RemoveDomainRecordFromIndex(normalizedDomain, match);
                     RemoveDomainIndexIfUnused(normalizedDomain);
-                    logger.LogInformation("已删除自定义记录: {Domain} {Type} {Value}", domain, type, value);
+                    logger.LogInformation("Deleted custom record: {Domain} {Type} {Value}", domain, type, value);
                     await SaveToPersistenceAsync();
                     return true;
                 }
@@ -347,7 +347,7 @@ public sealed class CustomRecordStore(
             if (_records.TryUpdate(key, updated, existing))
             {
                 RemoveDomainRecordFromIndex(normalizedDomain, match);
-                logger.LogInformation("已删除自定义记录: {Domain} {Type} {Value}", domain, type, value);
+                logger.LogInformation("Deleted custom record: {Domain} {Type} {Value}", domain, type, value);
                 await SaveToPersistenceAsync();
                 return true;
             }
@@ -374,7 +374,7 @@ public sealed class CustomRecordStore(
         _records.Clear();
         _domainIndex.Clear();
         _recordsByDomain.Clear();
-        logger.LogInformation("已清空所有自定义记录");
+        logger.LogInformation("Cleared all custom records");
         await SaveToPersistenceAsync();
     }
 

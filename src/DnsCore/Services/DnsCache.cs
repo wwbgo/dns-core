@@ -79,7 +79,7 @@ public sealed class DnsCache
                 shard.Lru.Remove(node);
                 shard.Index.Remove(key);
                 Interlocked.Increment(ref _misses);
-                _logger.LogDebug("缓存过期: {Domain} {Type}", domain, type);
+                _logger.LogDebug("Cache entry expired: {Domain} {Type}", domain, type);
                 return null;
             }
 
@@ -132,7 +132,7 @@ public sealed class DnsCache
             ExpiresAt = DateTime.UtcNow.Add(ttl)
         });
 
-        _logger.LogDebug("已缓存: {Domain} {Type}, TTL: {TTL}s", domain, type, (int)ttl.TotalSeconds);
+        _logger.LogDebug("Cached: {Domain} {Type}, TTL: {TTL}s", domain, type, (int)ttl.TotalSeconds);
     }
 
     /// <summary>
@@ -154,7 +154,7 @@ public sealed class DnsCache
             ExpiresAt = DateTime.UtcNow.Add(_negativeTtl)
         });
 
-        _logger.LogDebug("已缓存否定应答: {Domain} {Type} {Code}, TTL: {TTL}s",
+        _logger.LogDebug("Cached negative response: {Domain} {Type} {Code}, TTL: {TTL}s",
             domain, type, code, (int)_negativeTtl.TotalSeconds);
     }
 
@@ -245,7 +245,7 @@ public sealed class DnsCache
 
             shard.Lru.RemoveLast();
             shard.Index.Remove(last.Value.Key);
-            _logger.LogDebug("淘汰最旧缓存条目: {Domain} {Type}",
+            _logger.LogDebug("Evicted oldest cache entry: {Domain} {Type}",
                 last.Value.Key.Domain, last.Value.Key.Type);
             return true;
         }
@@ -266,7 +266,7 @@ public sealed class DnsCache
             }
         }
 
-        _logger.LogInformation("缓存已清空，移除 {Count} 条", count);
+        _logger.LogInformation("Cache cleared; removed {Count} entries", count);
     }
 
     /// <summary>缓存统计</summary>
@@ -334,7 +334,7 @@ public sealed class DnsCache
         }
 
         if (removed > 0)
-            _logger.LogDebug("已清理 {Count} 条过期缓存", removed);
+            _logger.LogDebug("Removed {Count} expired cache entries", removed);
     }
 
     private Shard GetShard(CacheKey key)

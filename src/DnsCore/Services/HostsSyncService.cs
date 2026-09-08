@@ -52,19 +52,27 @@ public sealed class HostsSyncService(
                     await sourceStore.UpdateSyncStatusAsync(source.Id, DateTime.UtcNow, null);
 
                     logger.LogInformation(
-                        "hosts URL 来源同步成功: {Name}，导入 {Imported} 条，跳过重复 {Skipped} 条",
+                        "hosts URL source sync succeeded: {Name}, imported {Imported}, skipped duplicates {Skipped}",
                         source.Name,
                         result.Imported,
                         result.SkippedDuplicates);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    throw;
+                    logger.LogWarning(
+                        "hosts URL source sync timed out: {Name} {Url}",
+                        source.Name,
+                        source.Url);
+
+                    await sourceStore.UpdateSyncErrorAsync(source.Id, "Request timed out");
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "hosts URL 来源同步失败: {Name} {Url}", source.Name, source.Url);
-                    await sourceStore.UpdateSyncStatusAsync(source.Id, DateTime.UtcNow, ex.Message);
+                    logger.LogError(ex, "hosts URL source sync failed: {Name} {Url}", source.Name, source.Url);
+
+                    // 失败时不推进 LastSyncedAtUtc，下一轮检查会继续重试；
+                    // 否则一次瞬时网络错误会导致整个同步周期内本地记录缺失。
+                    await sourceStore.UpdateSyncErrorAsync(source.Id, ex.Message);
                 }
             });
     }

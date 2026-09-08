@@ -50,7 +50,7 @@ public sealed class HostsImportService(
         }
 
         logger.LogInformation(
-            "hosts 文本导入完成：解析 {Parsed} 条，导入 {Imported} 条，跳过重复 {Skipped} 条",
+            "hosts text import completed: parsed {Parsed}, imported {Imported}, skipped duplicates {Skipped}",
             parsed.Records.Count,
             imported.Imported,
             imported.SkippedDuplicates);
@@ -89,17 +89,18 @@ public sealed class HostsImportService(
     private async Task<HostsImportResult> ImportUrlCoreAsync(string? sourceId, string url, int ttl)
     {
         if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
-            throw new ArgumentException("请输入有效的 URL", nameof(url));
+            throw new ArgumentException("Please enter a valid URL", nameof(url));
 
         if (uri.Scheme is not ("http" or "https"))
-            throw new ArgumentException("仅支持 http/https hosts URL", nameof(url));
+            throw new ArgumentException("Only http/https hosts URLs are supported", nameof(url));
 
         ValidateRemoteUrl(uri, allowLoopback);
 
         if (httpClientFactory is null)
-            throw new InvalidOperationException("未配置 HttpClientFactory，无法导入 URL");
+            throw new InvalidOperationException("HttpClientFactory is not configured; URL import is unavailable");
 
-        var text = await FetchUrlTextAsync(httpClientFactory.CreateClient(), uri);
+        using var timeoutCts = new CancellationTokenSource(UrlTimeout);
+        var text = await FetchUrlTextAsync(httpClientFactory.CreateClient(), uri, timeoutCts.Token);
         var parsed = HostsFileParser.Parse(text);
 
         if (sourceId is not null)
@@ -114,7 +115,7 @@ public sealed class HostsImportService(
         int ttl)
     {
         if (recordOwnershipStore is null)
-            throw new InvalidOperationException("未配置 HostsSourceRecordStore，无法执行来源差异同步");
+            throw new InvalidOperationException("HostsSourceRecordStore is not configured; source diff sync is unavailable");
 
         await _reconcileLock.WaitAsync();
         try
@@ -215,7 +216,7 @@ public sealed class HostsImportService(
             await recordOwnershipStore.SaveAsync();
 
             logger.LogInformation(
-                "hosts 来源同步完成: {SourceId}，新增 {Imported}，更新 {Updated}，删除 {Removed}，跳过 {Skipped}",
+                "hosts source sync completed: {SourceId}, added {Imported}, updated {Updated}, removed {Removed}, skipped {Skipped}",
                 sourceId,
                 imported,
                 updated,
@@ -277,30 +278,40 @@ public sealed class HostsImportService(
         return (new HostsImportResult(toAdd.Count, skipped, errors), toAdd);
     }
 
-    private static async Task<string> FetchUrlTextAsync(HttpClient client, Uri uri)
+    private static async Task<string> FetchUrlTextAsync(
+        HttpClient client,
+        Uri uri,
+        CancellationToken cancellationToken)
     {
-        using var response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await client.GetAsync(
+            uri,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
         response.EnsureSuccessStatusCode();
 
         if (response.Content.Headers.ContentLength is > MaxUrlBytes)
-            throw new InvalidOperationException("hosts URL 内容超过 1MB 限制");
+            throw new InvalidOperationException("hosts URL content exceeds the 1MB limit");
 
-        await using var stream = await response.Content.ReadAsStreamAsync();
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new StreamReader(stream);
         var buffer = new char[MaxUrlBytes];
         var total = 0;
 
         while (total < buffer.Length)
         {
-            var read = await reader.ReadAsync(buffer.AsMemory(total, buffer.Length - total));
+            var read = await reader.ReadAsync(buffer.AsMemory(total, buffer.Length - total), cancellationToken);
             if (read == 0)
                 break;
 
             total += read;
         }
 
-        if (total >= buffer.Length && reader.Peek() >= 0)
-            throw new InvalidOperationException("hosts URL 内容超过 1MB 限制");
+        if (total >= buffer.Length)
+        {
+            var extra = new char[1];
+            if (await reader.ReadAsync(extra.AsMemory(), cancellationToken) > 0)
+                throw new InvalidOperationException("hosts URL content exceeds the 1MB limit");
+        }
 
         return new string(buffer, 0, total);
     }
@@ -312,7 +323,7 @@ public sealed class HostsImportService(
 
         var host = uri.Host;
         if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("不允许导入 localhost 地址的 hosts URL", nameof(uri));
+            throw new ArgumentException("hosts URLs pointing to localhost are not allowed", nameof(uri));
 
         if (!IPAddress.TryParse(host, out var ip))
             return;
@@ -322,7 +333,7 @@ public sealed class HostsImportService(
             || ip.Equals(IPAddress.IPv6Any)
             || ip.IsIPv6LinkLocal)
         {
-            throw new ArgumentException("不允许导入环回或链路本地地址的 hosts URL", nameof(uri));
+            throw new ArgumentException("hosts URLs pointing to loopback or link-local addresses are not allowed", nameof(uri));
         }
 
         var bytes = ip.GetAddressBytes();
@@ -331,7 +342,7 @@ public sealed class HostsImportService(
             && bytes[0] == 169
             && bytes[1] == 254)
         {
-            throw new ArgumentException("不允许导入链路本地地址的 hosts URL", nameof(uri));
+            throw new ArgumentException("hosts URLs pointing to link-local addresses are not allowed", nameof(uri));
         }
     }
 

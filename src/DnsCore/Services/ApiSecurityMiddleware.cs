@@ -33,14 +33,14 @@ public sealed class ApiSecurityMiddleware(
 
         if (options.EnableIpRestriction && !_acl.IsAllowed(remoteIp))
         {
-            logger.LogWarning("拒绝来自 {Ip} 的管理 API 请求：不在允许网段内", remoteIp);
+            logger.LogWarning("Rejected management API request from {Ip}: source network is not allowed", remoteIp);
             await WriteProblemAsync(context, StatusCodes.Status403Forbidden, "来源地址不被允许");
             return;
         }
 
         if (options.RequireApiKey && !IsKeyValid(context))
         {
-            logger.LogWarning("拒绝来自 {Ip} 的管理 API 请求：API Key 无效", remoteIp);
+            logger.LogWarning("Rejected management API request from {Ip}: invalid API key", remoteIp);
             await WriteProblemAsync(context, StatusCodes.Status401Unauthorized, "缺少或无效的 API Key");
             return;
         }

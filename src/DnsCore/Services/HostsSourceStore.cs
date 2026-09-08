@@ -33,7 +33,7 @@ public sealed class HostsSourceStore(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "加载 hosts URL 来源失败");
+            logger.LogError(ex, "Failed to load hosts URL sources");
         }
         finally
         {
@@ -83,7 +83,7 @@ public sealed class HostsSourceStore(
             if (_sources.Any(s =>
                     string.Equals(s.Url, url, StringComparison.OrdinalIgnoreCase)))
             {
-                throw new InvalidOperationException("该 URL 已存在");
+                throw new InvalidOperationException("This URL already exists");
             }
 
             var source = new HostsSource
@@ -145,7 +145,7 @@ public sealed class HostsSourceStore(
                     s.Id != id
                     && string.Equals(s.Url, url, StringComparison.OrdinalIgnoreCase)))
             {
-                throw new InvalidOperationException("该 URL 已存在");
+                throw new InvalidOperationException("This URL already exists");
             }
 
             source.Name = name.Trim();
@@ -204,6 +204,28 @@ public sealed class HostsSourceStore(
         }
     }
 
+    /// <summary>
+    /// 同步失败时只记录错误，不更新最近成功同步时间。
+    /// 这样下一轮 60 秒检查会继续重试，而不是误以为已经同步过并跳过整个周期。
+    /// </summary>
+    public async Task UpdateSyncErrorAsync(string id, string error)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var source = _sources.FirstOrDefault(s => s.Id == id);
+            if (source is null)
+                return;
+
+            source.LastSyncError = error;
+            await SaveAsync();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private void NormalizeLoadedSources()
     {
         foreach (var source in _sources)
@@ -240,19 +262,19 @@ public sealed class HostsSourceStore(
         int ttl)
     {
         if (string.IsNullOrWhiteSpace(name))
-            throw new ArgumentException("名称不能为空", nameof(name));
+            throw new ArgumentException("Name is required", nameof(name));
 
         if (string.IsNullOrWhiteSpace(url)
             || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
             || uri.Scheme is not ("http" or "https"))
         {
-            throw new ArgumentException("URL 必须是有效的 http/https 地址", nameof(url));
+            throw new ArgumentException("URL must be a valid http/https address", nameof(url));
         }
 
         if (syncIntervalMinutes is < 1 or > 10080)
-            throw new ArgumentException("同步周期必须在 1 到 10080 分钟之间", nameof(syncIntervalMinutes));
+            throw new ArgumentException("Sync interval must be between 1 and 10080 minutes", nameof(syncIntervalMinutes));
 
         if (ttl is <= 0 or > int.MaxValue / 2)
-            throw new ArgumentException("TTL 必须大于 0", nameof(ttl));
+            throw new ArgumentException("TTL must be greater than 0", nameof(ttl));
     }
 }

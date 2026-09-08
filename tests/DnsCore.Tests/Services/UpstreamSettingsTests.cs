@@ -1,8 +1,10 @@
 using DnsCore.Configuration;
+using DnsCore.Models;
 using DnsCore.Services;
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Moq;
+using System.Net;
 
 namespace DnsCore.Tests.Services;
 
@@ -39,6 +41,43 @@ public class UpstreamSettingsTests
         RaceUpstreams = false
     };
 
+    [Fact]
+    public void BuildQuery_ShouldIncludeEdnsOptByDefault()
+    {
+        var query = UpstreamDnsResolver.BuildQuery(0x1234, "example.com", DnsRecordType.A, 1);
+        var header = DnsHeader.FromBytes(query);
+
+        header.AdditionalCount.Should().Be(1);
+        query.Length.Should().BeGreaterThan(DnsHeader.Size);
+    }
+
+    [Fact]
+    public void BuildQuery_ShouldOmitEdnsOptWhenRequested()
+    {
+        var query = UpstreamDnsResolver.BuildQuery(
+            0x1234,
+            "example.com",
+            DnsRecordType.A,
+            1,
+            includeEdns: false);
+        var header = DnsHeader.FromBytes(query);
+
+        header.AdditionalCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void IsDockerEmbeddedDns_ShouldOnlyAllowDockerAddressInsideContainer()
+    {
+        var dockerDns = IPAddress.Parse("127.0.0.11");
+
+        UpstreamDnsResolver.IsDockerEmbeddedDns(dockerDns, runningInContainer: true)
+            .Should().BeTrue();
+        UpstreamDnsResolver.IsDockerEmbeddedDns(dockerDns, runningInContainer: false)
+            .Should().BeFalse();
+        UpstreamDnsResolver.IsDockerEmbeddedDns(IPAddress.Loopback, runningInContainer: true)
+            .Should().BeFalse();
+    }
+
     // ==== 默认值 ====
 
     [Fact]
@@ -73,7 +112,7 @@ public class UpstreamSettingsTests
         var result = store.Validate(settings);
 
         result.IsValid.Should().BeFalse();
-        result.Error.Should().Contain("环路");
+        result.Error.Should().Contain("query loop");
     }
 
     [Theory]
@@ -108,7 +147,7 @@ public class UpstreamSettingsTests
         var result = store.Validate(settings);
 
         result.IsValid.Should().BeFalse();
-        result.Error.Should().Contain("无效的 IP");
+        result.Error.Should().Contain("Invalid IP address");
     }
 
     [Theory]
@@ -135,7 +174,7 @@ public class UpstreamSettingsTests
         var result = store.Validate(settings);
 
         result.IsValid.Should().BeFalse();
-        result.Error.Should().Contain("重复");
+        result.Error.Should().Contain("Duplicate upstream server");
     }
 
     [Theory]

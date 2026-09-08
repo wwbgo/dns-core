@@ -53,7 +53,7 @@ builder.Services.AddSingleton<IDnsRecordRepository>(sp =>
     var logger = sp.GetRequiredService<ILogger<Program>>();
     var persistence = dnsOptions.Persistence;
 
-    logger.LogInformation("持久化提供者: {Provider}, 文件路径: {FilePath}",
+    logger.LogInformation("Persistence provider: {Provider}, file path: {FilePath}",
         persistence.Provider, persistence.FilePath);
 
     return persistence.Provider switch
@@ -100,7 +100,7 @@ if (dnsOptions.CustomRecords.Count > 0)
 {
     // 批量添加只落盘一次；DnsServer 启动时不再重复加载同一批记录
     await customRecordStore.AddRecordsAsync(dnsOptions.CustomRecords);
-    app.Logger.LogInformation("已合入配置文件中的 {Count} 条初始记录", dnsOptions.CustomRecords.Count);
+    app.Logger.LogInformation("Merged {Count} initial records from configuration", dnsOptions.CustomRecords.Count);
 }
 
 // 加载前端保存过的上游设置，覆盖 appsettings.json 中的初始值。
@@ -407,33 +407,34 @@ qpsApi.MapGet("/", (DnsQueryStatistics statistics) => Results.Ok(statistics.GetS
 qpsApi.MapGet("/latency", (DnsLatencyStatistics latencyStats) => Results.Ok(latencyStats.GetStats()))
     .WithName("GetLatencyStatistics");
 
-app.Logger.LogInformation("DNS Core Server 正在启动...");
-app.Logger.LogInformation("DNS 监听: {Address}:{Port} (UDP/TCP)", dnsOptions.ListenAddress, dnsOptions.Port);
-app.Logger.LogInformation("管理 API 鉴权: {State}", apiSecurity.RequireApiKey ? "已启用" : "已禁用");
+app.Logger.LogInformation("DNS Core Server is starting...");
+app.Logger.LogInformation("DNS listening: {Address}:{Port} (UDP/TCP)", dnsOptions.ListenAddress, dnsOptions.Port);
+app.Logger.LogInformation("Management API authentication: {State}", apiSecurity.RequireApiKey ? "enabled" : "disabled");
 
 if (!apiSecurity.RequireApiKey)
-    app.Logger.LogWarning("管理 API 鉴权已禁用，任何可访问该端口的人都能修改 DNS 记录");
+    app.Logger.LogWarning("Management API authentication is disabled; anyone who can reach this port can modify DNS records");
 
 if (apiSecurity.EnableIpRestriction)
-    app.Logger.LogInformation("管理 API 来源限制: {Networks}", string.Join(", ", apiSecurity.AllowedNetworks));
+    app.Logger.LogInformation("Management API source restriction: {Networks}", string.Join(", ", apiSecurity.AllowedNetworks));
 else
-    app.Logger.LogWarning("管理 API 来源限制已禁用");
+    app.Logger.LogWarning("Management API source restriction is disabled");
 
 // 两道防线同时关闭时，管理接口对所有能访问该端口的人完全开放，
 // 单独看任一条告警都不足以体现严重性，这里显式合并提示
 if (!apiSecurity.RequireApiKey && !apiSecurity.EnableIpRestriction)
 {
     app.Logger.LogWarning(
-        "【安全风险】API Key 与来源限制均已关闭：/api/* 全部端点无任何防护，" +
-        "任何人都可改写 DNS 记录与上游配置，进而劫持全部客户端的域名解析。" +
-        "生产环境请设置 DNSCORE_API_KEY 并启用 ApiSecurity:RequireApiKey。");
+        "[Security risk] API key and source restrictions are both disabled. " +
+        "All /api/* endpoints are unprotected and anyone can modify DNS records " +
+        "and upstream configuration. Set DNSCORE_API_KEY and enable " +
+        "ApiSecurity:RequireApiKey in production.");
 }
 
 if (!dnsOptions.Security.EnableClientRestriction)
 {
     app.Logger.LogWarning(
-        "DNS 客户端网段限制已禁用：本服务将应答任意来源的查询，" +
-        "若暴露在公网会成为开放解析器（可被用于 DNS 放大攻击）。");
+        "DNS client network restriction is disabled. This server will answer " +
+        "queries from any source and may become an open resolver if exposed publicly.");
 }
 
 await app.RunAsync();

@@ -91,8 +91,9 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 ENV DOTNET_EnableDiagnostics=0
 
 # 设置 UTF-8 编码支持（修复中文乱码）
-ENV LANG=zh_CN.UTF-8
-ENV LC_ALL=zh_CN.UTF-8
+# aspnet 镜像只生成了 C.UTF-8 locale；zh_CN.UTF-8 在该镜像中不存在。
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
 
 # 健康检查

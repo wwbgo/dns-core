@@ -21,10 +21,10 @@ public sealed class DnsServerHostedService(
         }
     }
 
-    public override Task StopAsync(CancellationToken cancellationToken)
+    public override async Task StopAsync(CancellationToken cancellationToken)
     {
         logger.LogInformation("DNS server background service is stopping...");
-        dnsServer.Stop();
-        return base.StopAsync(cancellationToken);
+        await dnsServer.StopAsync(cancellationToken);
+        await base.StopAsync(cancellationToken);
     }
 }

@@ -40,6 +40,19 @@ public sealed class UpstreamDnsResolver(
     private const int DnsPort = 53;
     private const int MaxPooledSocketsPerUpstream = 64;
 
+    // EDNS0 可避免多数应答在传统 512 字节限制下被截断。
+    private const int UpstreamUdpPayloadSize = 1232;
+
+    // Docker 内置 DNS 监听在 127.0.0.11。它不是本服务自身，过滤掉会让容器
+    // 错误地回落到 8.8.8.8/1.1.1.1，在无法访问公网 DNS 的环境中表现为全部上游失败。
+    private static readonly IPAddress DockerEmbeddedDns = IPAddress.Parse("127.0.0.11");
+    private static readonly bool RunningInContainer =
+        string.Equals(
+            Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"),
+            "true",
+            StringComparison.OrdinalIgnoreCase)
+        || (OperatingSystem.IsLinux() && File.Exists("/.dockerenv"));
+
     private int TimeoutMs => Math.Max(200, serverOptions.Upstream.TimeoutMilliseconds);
 
     /// <summary>设置上游 DNS 服务器</summary>
@@ -52,11 +65,11 @@ public sealed class UpstreamDnsResolver(
             if (IPAddress.TryParse(server.Trim(), out var ip))
             {
                 parsed.Add(ip);
-                logger.LogInformation("已添加上游 DNS 服务器: {Server}", ip);
+                logger.LogInformation("Added upstream DNS server: {Server}", ip);
             }
             else
             {
-                logger.LogWarning("无效的上游 DNS 服务器地址: {Server}", server);
+                logger.LogWarning("Invalid upstream DNS server address: {Server}", server);
             }
         }
 
@@ -96,7 +109,7 @@ public sealed class UpstreamDnsResolver(
             var cached = dnsCache.Get(domain, type, classValue);
             if (cached is not null)
             {
-                logger.LogDebug("缓存命中: {Domain} {Type}", domain, type);
+                logger.LogDebug("Cache hit: {Domain} {Type}", domain, type);
                 return new UpstreamResponse { ResponseCode = cached.ResponseCode, Answers = cached.Records };
             }
         }
@@ -104,7 +117,7 @@ public sealed class UpstreamDnsResolver(
         var servers = _upstreamServers;
         if (servers.Length == 0)
         {
-            logger.LogWarning("没有可用的上游 DNS 服务器");
+            logger.LogWarning("No upstream DNS servers are available");
             return null;
         }
 
@@ -117,7 +130,7 @@ public sealed class UpstreamDnsResolver(
 
             if (response is null)
             {
-                logger.LogWarning("全部上游 DNS 查询失败: {Domain} {Type}", domain, type);
+                logger.LogWarning("All upstream DNS queries failed: {Domain} {Type}", domain, type);
                 return null;
             }
 
@@ -226,22 +239,23 @@ public sealed class UpstreamDnsResolver(
         }
         catch (OperationCanceledException)
         {
-            logger.LogDebug("上游 DNS 查询超时: {Server} {Domain} {Type}", server, domain, type);
+            logger.LogDebug("Upstream DNS query timed out: {Server} {Domain} {Type}", server, domain, type);
             return null;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "租用上游 socket 失败: {Server}", server);
+            logger.LogWarning(ex, "Failed to rent upstream socket: {Server}", server);
             return null;
         }
 
         var returnToPool = false;
+        var includeEdns = true;
 
         try
         {
             try
             {
-                var queryData = BuildQuery(transactionId, domain, type, classValue);
+                var queryData = BuildQuery(transactionId, domain, type, classValue, includeEdns);
                 var udpClient = lease.Client;
 
                 await udpClient.SendAsync(queryData, timeoutCts.Token);
@@ -252,7 +266,23 @@ public sealed class UpstreamDnsResolver(
                     var result = await udpClient.ReceiveAsync(timeoutCts.Token);
 
                     var response = ValidateAndParse(
-                        result.Buffer, transactionId, domain, type, classValue, server);
+                        result.Buffer,
+                        transactionId,
+                        domain,
+                        type,
+                        classValue,
+                        server,
+                        out var truncated);
+
+                    if (response is not null
+                        && includeEdns
+                        && response.ResponseCode is DnsResponseCode.FormErr or DnsResponseCode.NotImp)
+                    {
+                        includeEdns = false;
+                        queryData = BuildQuery(transactionId, domain, type, classValue, includeEdns: false);
+                        await udpClient.SendAsync(queryData, timeoutCts.Token);
+                        continue;
+                    }
 
                     if (response is not null)
                     {
@@ -260,7 +290,20 @@ public sealed class UpstreamDnsResolver(
                         return response;
                     }
 
-                    logger.LogDebug("丢弃与查询不匹配的上游应答: {Server} {Domain} {Type}", server, domain, type);
+                    if (truncated)
+                    {
+                        lease.Discard();
+                        returnToPool = false;
+                        return await QueryServerOverTcpAsync(
+                            server,
+                            transactionId,
+                            domain,
+                            type,
+                            classValue,
+                            timeoutCts.Token);
+                    }
+
+                    logger.LogDebug("Discarded upstream response that did not match the query: {Server} {Domain} {Type}", server, domain, type);
                 }
 
                 return null;
@@ -275,13 +318,93 @@ public sealed class UpstreamDnsResolver(
         }
         catch (OperationCanceledException)
         {
-            logger.LogDebug("上游 DNS 查询超时: {Server} {Domain} {Type}", server, domain, type);
+            logger.LogDebug("Upstream DNS query timed out: {Server} {Domain} {Type}", server, domain, type);
             return null;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "查询上游 DNS 服务器失败: {Server}", server);
+            logger.LogWarning(ex, "Failed to query upstream DNS server: {Server}", server);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// UDP 应答设置了 TC 位时，按 RFC 1035 回退到 TCP 重新查询。
+    /// </summary>
+    private async Task<UpstreamResponse?> QueryServerOverTcpAsync(
+        IPAddress server,
+        ushort transactionId,
+        string domain,
+        DnsRecordType type,
+        ushort classValue,
+        CancellationToken cancellationToken)
+    {
+        using var tcpClient = new TcpClient(server.AddressFamily);
+
+        try
+        {
+            await tcpClient.ConnectAsync(new IPEndPoint(server, DnsPort), cancellationToken);
+
+            var stream = tcpClient.GetStream();
+            var queryData = BuildQuery(transactionId, domain, type, classValue);
+            var lengthPrefix = new byte[]
+            {
+                (byte)(queryData.Length >> 8),
+                (byte)(queryData.Length & 0xFF)
+            };
+
+            await stream.WriteAsync(lengthPrefix, cancellationToken);
+            await stream.WriteAsync(queryData, cancellationToken);
+            await stream.FlushAsync(cancellationToken);
+
+            var responseLengthBytes = new byte[2];
+            await ReadExactlyAsync(stream, responseLengthBytes, cancellationToken);
+
+            var responseLength = (responseLengthBytes[0] << 8) | responseLengthBytes[1];
+            if (responseLength < DnsHeader.Size || responseLength > DnsLimits.MaxMessageSize)
+            {
+                logger.LogDebug("Invalid TCP DNS response length from upstream {Server}: {Length}", server, responseLength);
+                return null;
+            }
+
+            var responseData = new byte[responseLength];
+            await ReadExactlyAsync(stream, responseData, cancellationToken);
+
+            return ValidateAndParse(
+                responseData,
+                transactionId,
+                domain,
+                type,
+                classValue,
+                server,
+                out _);
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogDebug("Upstream DNS over TCP timed out: {Server} {Domain} {Type}", server, domain, type);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Upstream DNS over TCP query failed: {Server}", server);
+            return null;
+        }
+    }
+
+    private static async Task ReadExactlyAsync(
+        Stream stream,
+        Memory<byte> buffer,
+        CancellationToken cancellationToken)
+    {
+        var total = 0;
+
+        while (total < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer[total..], cancellationToken);
+            if (read == 0)
+                throw new EndOfStreamException();
+
+            total += read;
         }
     }
 
@@ -289,7 +412,12 @@ public sealed class UpstreamDnsResolver(
     /// 构建上游查询报文。不再转发客户端原始报文：
     /// 客户端 TXID 不应外泄，且原报文可能带有不该转发的 EDNS 选项。
     /// </summary>
-    private static byte[] BuildQuery(ushort transactionId, string domain, DnsRecordType type, ushort classValue)
+    internal static byte[] BuildQuery(
+        ushort transactionId,
+        string domain,
+        DnsRecordType type,
+        ushort classValue,
+        bool includeEdns = true)
     {
         // 上游查询使用栈上缓冲直接编码，不创建 DnsWriter 与压缩字典。
         Span<byte> buffer = stackalloc byte[512];
@@ -298,7 +426,8 @@ public sealed class UpstreamDnsResolver(
         {
             TransactionId = transactionId,
             Flags = 0x0100, // 标准查询 + RD
-            QuestionCount = 1
+            QuestionCount = 1,
+            AdditionalCount = includeEdns ? (ushort)1 : (ushort)0
         };
 
         header.WriteTo(buffer);
@@ -309,6 +438,22 @@ public sealed class UpstreamDnsResolver(
         buffer[position++] = (byte)((ushort)type & 0xFF);
         buffer[position++] = (byte)(classValue >> 8);
         buffer[position++] = (byte)(classValue & 0xFF);
+
+        if (includeEdns)
+        {
+            // OPT pseudo-record: NAME=0, TYPE=41, CLASS=UDP payload size, TTL=0, RDLEN=0
+            buffer[position++] = 0;
+            buffer[position++] = 0;
+            buffer[position++] = 41;
+            buffer[position++] = (byte)(UpstreamUdpPayloadSize >> 8);
+            buffer[position++] = (byte)(UpstreamUdpPayloadSize & 0xFF);
+            buffer[position++] = 0;
+            buffer[position++] = 0;
+            buffer[position++] = 0;
+            buffer[position++] = 0;
+            buffer[position++] = 0;
+            buffer[position++] = 0;
+        }
 
         return buffer[..position].ToArray();
     }
@@ -342,9 +487,16 @@ public sealed class UpstreamDnsResolver(
     /// 原实现完全不做这些校验，构成标准的缓存投毒面。
     /// </summary>
     private UpstreamResponse? ValidateAndParse(
-        byte[] responseData, ushort expectedId, string expectedDomain,
-        DnsRecordType expectedType, ushort expectedClass, IPAddress server)
+        byte[] responseData,
+        ushort expectedId,
+        string expectedDomain,
+        DnsRecordType expectedType,
+        ushort expectedClass,
+        IPAddress server,
+        out bool truncated)
     {
+        truncated = false;
+
         try
         {
             var header = DnsHeader.FromBytes(responseData);
@@ -367,10 +519,11 @@ public sealed class UpstreamDnsResolver(
                 || !questionName.Equals(expectedDomain.TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
                 return null;
 
-            // 被截断的 UDP 应答不可信，交由上层按失败处理
+            // UDP 截断应答由调用方回退到 TCP 查询。
             if (header.IsTruncated)
             {
-                logger.LogDebug("上游应答被截断: {Server} {Domain}", server, expectedDomain);
+                truncated = true;
+                logger.LogDebug("Upstream response was truncated: {Server} {Domain}", server, expectedDomain);
                 return null;
             }
 
@@ -391,7 +544,7 @@ public sealed class UpstreamDnsResolver(
         }
         catch (InvalidDataException ex)
         {
-            logger.LogDebug(ex, "上游 DNS 应答格式非法: {Server}", server);
+            logger.LogDebug(ex, "Invalid upstream DNS response format: {Server}", server);
             return null;
         }
     }
@@ -484,6 +637,9 @@ public sealed class UpstreamDnsResolver(
         return string.Concat(parts);
     }
 
+    internal static bool IsDockerEmbeddedDns(IPAddress ip, bool runningInContainer)
+        => runningInContainer && ip.Equals(DockerEmbeddedDns);
+
     /// <summary>加载系统 DNS 服务器</summary>
     private List<IPAddress> LoadSystemDnsServers()
     {
@@ -494,22 +650,22 @@ public sealed class UpstreamDnsResolver(
             result.AddRange(NetworkInterface.GetAllNetworkInterfaces()
                 .Where(iface => iface.OperationalStatus == OperationalStatus.Up)
                 .SelectMany(iface => iface.GetIPProperties().DnsAddresses)
-                // 排除本机地址，否则会把查询转回自己形成环
-                .Where(ip => !IPAddress.IsLoopback(ip))
+                // 排除会把查询转回自己的回环地址；容器内的 Docker 内置 DNS 是例外。
+                .Where(ip => !IPAddress.IsLoopback(ip) || IsDockerEmbeddedDns(ip, RunningInContainer))
                 .Distinct());
 
             if (result.Count > 0)
             {
-                logger.LogInformation("使用系统 DNS 服务器: {Servers}", string.Join(", ", result));
+                logger.LogInformation("Using system DNS servers: {Servers}", string.Join(", ", result));
                 return result;
             }
 
             result.AddRange([IPAddress.Parse("8.8.8.8"), IPAddress.Parse("1.1.1.1")]);
-            logger.LogInformation("使用默认公共 DNS 服务器: 8.8.8.8, 1.1.1.1");
+            logger.LogInformation("Using default public DNS servers: 8.8.8.8, 1.1.1.1");
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "加载系统 DNS 服务器失败");
+            logger.LogError(ex, "Failed to load system DNS servers");
         }
 
         return result;

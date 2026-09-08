@@ -407,6 +407,13 @@ environment:
   - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
 ```
 
+如果容器内配置正确、但 Windows 终端仍显示 `?`，先切换到 UTF-8 代码页：
+
+```bat
+chcp 65001
+docker logs dns-core-server
+```
+
 ### 5. 构建失败
 
 **检查：**

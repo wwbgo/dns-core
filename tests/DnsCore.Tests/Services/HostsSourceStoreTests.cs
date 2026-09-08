@@ -19,6 +19,27 @@ public sealed class HostsSourceStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateSyncErrorAsync_ShouldKeepLastSuccessfulSyncTime()
+    {
+        var path = Path.Combine(_dir, "hosts-sources.json");
+        var store = new HostsSourceStore(new Mock<ILogger<HostsSourceStore>>().Object, path);
+        var source = await store.AddAsync(
+            "example",
+            "https://example.com/hosts",
+            syncIntervalMinutes: 60,
+            ttl: 3600);
+
+        var successTime = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        await store.UpdateSyncStatusAsync(source.Id, successTime, null);
+        await store.UpdateSyncErrorAsync(source.Id, "network timeout");
+
+        var reloaded = await store.GetAsync(source.Id);
+        reloaded.Should().NotBeNull();
+        reloaded!.LastSyncedAtUtc.Should().Be(successTime);
+        reloaded.LastSyncError.Should().Be("network timeout");
+    }
+
+    [Fact]
     public async Task LoadAsync_ShouldNormalizeInvalidPersistedValues()
     {
         var path = Path.Combine(_dir, "hosts-sources.json");

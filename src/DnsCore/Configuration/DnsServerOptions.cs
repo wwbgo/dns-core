@@ -22,6 +22,13 @@ public class DnsServerOptions
     /// </summary>
     public string? Hostname { get; set; }
 
+    /// <summary>
+    /// 客户端视角下的 DNS 服务器地址。容器端口映射场景中，客户端查询的通常是宿主机 IP，
+    /// 而不是容器内部 IP；仅靠本机网卡枚举无法识别这个地址。配置后可让 nslookup 的
+    /// 反向 PTR 查询直接返回 <see cref="Hostname"/>，避免先超时再显示 UnKnown。
+    /// </summary>
+    public List<string> PtrHostAddresses { get; set; } = [];
+
     public List<string> UpstreamDnsServers { get; set; } = new();
     public List<DnsRecord> CustomRecords { get; set; } = new();
     public PersistenceOptions Persistence { get; set; } = new();

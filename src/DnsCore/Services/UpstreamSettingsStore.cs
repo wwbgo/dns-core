@@ -48,7 +48,7 @@ public sealed class UpstreamSettingsStore(
         {
             if (!File.Exists(SettingsPath))
             {
-                logger.LogDebug("未找到上游设置文件，使用配置文件中的初始值");
+                logger.LogDebug("Upstream settings file not found; using configured defaults");
                 return;
             }
 
@@ -64,16 +64,16 @@ public sealed class UpstreamSettingsStore(
             var validation = Validate(settings);
             if (!validation.IsValid)
             {
-                logger.LogWarning("持久化的上游设置非法（{Error}），忽略并使用配置文件的值", validation.Error);
+                logger.LogWarning("Persisted upstream settings are invalid ({Error}); ignoring and using configured values", validation.Error);
                 return;
             }
 
             Apply(settings, persistedAlready: true);
-            logger.LogInformation("已从 {Path} 加载上游设置", SettingsPath);
+            logger.LogInformation("Loaded upstream settings from {Path}", SettingsPath);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "加载上游设置失败，使用配置文件中的值");
+            logger.LogError(ex, "Failed to load upstream settings; using configured values");
         }
     }
 
@@ -99,34 +99,34 @@ public sealed class UpstreamSettingsStore(
     public SettingsValidation Validate(UpstreamSettings settings)
     {
         if (settings is null)
-            return SettingsValidation.Fail("请求体不能为空");
+            return SettingsValidation.Fail("Request body is required");
 
         if (settings.TimeoutMilliseconds is < 200 or > 30000)
-            return SettingsValidation.Fail("超时时间必须在 200–30000 毫秒之间");
+            return SettingsValidation.Fail("Timeout must be between 200 and 30000 milliseconds");
 
         var servers = settings.UpstreamDnsServers ?? [];
 
         if (servers.Count > 16)
-            return SettingsValidation.Fail("上游服务器最多 16 个");
+            return SettingsValidation.Fail("At most 16 upstream servers are allowed");
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var raw in servers)
         {
             if (string.IsNullOrWhiteSpace(raw))
-                return SettingsValidation.Fail("上游服务器地址不能为空");
+                return SettingsValidation.Fail("Upstream server address cannot be empty");
 
             var trimmed = raw.Trim();
 
             if (!TryParseStrict(trimmed, out var ip))
-                return SettingsValidation.Fail($"无效的 IP 地址: {trimmed}（需填写完整 IP，不支持域名）");
+                return SettingsValidation.Fail($"Invalid IP address: {trimmed} (a complete IP is required; host names are not supported)");
 
             if (!seen.Add(ip.ToString()))
-                return SettingsValidation.Fail($"上游服务器地址重复: {trimmed}");
+                return SettingsValidation.Fail($"Duplicate upstream server address: {trimmed}");
 
             // 把上游指向本机会形成查询环：未命中 -> 转发给自己 -> 再次未命中
             if (IPAddress.IsLoopback(ip) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Any))
-                return SettingsValidation.Fail($"不能将上游指向本机地址 {trimmed}，会形成查询环路");
+                return SettingsValidation.Fail($"Upstream server cannot point to local address {trimmed} because it would create a query loop");
         }
 
         // 关闭上游转发时不要求配置服务器；开启时空列表意味着回落系统 DNS，也是合法的
@@ -186,9 +186,9 @@ public sealed class UpstreamSettingsStore(
             await File.WriteAllTextAsync(SettingsPath, json);
 
             logger.LogInformation(
-                "上游设置已更新：转发={Enabled}, 模式={Mode}, 超时={Timeout}ms, 服务器=[{Servers}]",
+                "Upstream settings updated: forwarding={Enabled}, mode={Mode}, timeout={Timeout}ms, servers=[{Servers}]",
                 settings.EnableUpstreamDnsQuery,
-                settings.RaceUpstreams ? "并行竞速" : "顺序尝试",
+                settings.RaceUpstreams ? "race" : "sequential",
                 settings.TimeoutMilliseconds,
                 string.Join(", ", settings.UpstreamDnsServers ?? []));
 
@@ -196,8 +196,8 @@ public sealed class UpstreamSettingsStore(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "保存上游设置失败");
-            return SettingsValidation.Fail($"保存失败: {ex.Message}");
+            logger.LogError(ex, "Failed to save upstream settings");
+            return SettingsValidation.Fail($"Save failed: {ex.Message}");
         }
         finally
         {
@@ -223,7 +223,7 @@ public sealed class UpstreamSettingsStore(
         if (!persistedAlready)
         {
             cache.Clear();
-            logger.LogInformation("上游变更，已清空 DNS 缓存");
+            logger.LogInformation("Upstream changed; DNS cache cleared");
         }
     }
 }

@@ -71,7 +71,7 @@ public sealed class HostsSourceRecordStore(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "加载 hosts 来源记录归属失败");
+            logger.LogError(ex, "Failed to load hosts source record ownership");
         }
         finally
         {
