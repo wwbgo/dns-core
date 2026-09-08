@@ -1598,8 +1598,9 @@ input[aria-invalid='true']:focus {
 .col-select input[type='checkbox'] {
     appearance: none;
     -webkit-appearance: none;
-    display: inline-grid;
-    place-items: center;
+    display: inline-block;
+    position: relative;
+    vertical-align: middle;
     width: 16px;
     height: 16px;
     min-height: 0;
@@ -1618,12 +1619,14 @@ input[aria-invalid='true']:focus {
 
 .col-select input[type='checkbox']:checked::after {
     content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
     width: 8px;
     height: 4px;
-    margin-top: -2px;
     border-left: 2px solid #fff;
     border-bottom: 2px solid #fff;
-    transform: rotate(-45deg);
+    transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .panel__footer {
