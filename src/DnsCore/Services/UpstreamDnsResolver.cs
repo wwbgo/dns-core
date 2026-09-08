@@ -18,6 +18,12 @@ public sealed record UpstreamResponse
     public bool HasAnswers => Answers.Count > 0;
 }
 
+internal sealed record UpstreamAttempt(UpstreamResponse? Response, string? Error);
+
+internal sealed record UpstreamBatchResult(
+    UpstreamResponse? Response,
+    IReadOnlyList<string> Errors);
+
 /// <summary>
 /// 上游 DNS 解析器。
 ///
@@ -124,18 +130,23 @@ public sealed class UpstreamDnsResolver(
         await _concurrencyLimit.WaitAsync(cancellationToken);
         try
         {
-            var response = serverOptions.Upstream.RaceUpstreams && servers.Length > 1
+            var result = serverOptions.Upstream.RaceUpstreams && servers.Length > 1
                 ? await RaceAsync(servers, domain, type, classValue, cancellationToken)
                 : await SequentialAsync(servers, domain, type, classValue, cancellationToken);
 
-            if (response is null)
+            if (result.Response is null)
             {
-                logger.LogWarning("All upstream DNS queries failed: {Domain} {Type}", domain, type);
+                var reasons = result.Errors.Distinct().Take(5);
+                logger.LogWarning(
+                    "All upstream DNS queries failed: {Domain} {Type}. Reasons: {Reasons}",
+                    domain,
+                    type,
+                    string.Join(" | ", reasons));
                 return null;
             }
 
-            CacheResponse(domain, type, classValue, response);
-            return response;
+            CacheResponse(domain, type, classValue, result.Response);
+            return result.Response;
         }
         finally
         {
@@ -160,8 +171,11 @@ public sealed class UpstreamDnsResolver(
     }
 
     /// <summary>并行竞速：取最先返回的成功应答</summary>
-    private async Task<UpstreamResponse?> RaceAsync(
-        IPAddress[] servers, string domain, DnsRecordType type, ushort classValue,
+    private async Task<UpstreamBatchResult> RaceAsync(
+        IPAddress[] servers,
+        string domain,
+        DnsRecordType type,
+        ushort classValue,
         CancellationToken cancellationToken)
     {
         using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -171,57 +185,73 @@ public sealed class UpstreamDnsResolver(
             .ToList();
 
         UpstreamResponse? fallback = null;
+        List<string> errors = [];
 
         while (tasks.Count > 0)
         {
             var completed = await Task.WhenAny(tasks);
             tasks.Remove(completed);
 
-            var result = await completed;
-            if (result is null)
-                continue;
-
-            // 有答案或明确的 NXDOMAIN 即可采用，取消其余在飞的查询
-            if (result.HasAnswers || result.ResponseCode == DnsResponseCode.NxDomain)
+            var attempt = await completed;
+            if (attempt.Response is null)
             {
-                await raceCts.CancelAsync();
-                return result;
+                if (!raceCts.IsCancellationRequested && attempt.Error is not null)
+                    errors.Add(attempt.Error);
+                continue;
             }
 
-            fallback ??= result;
+            // 有答案或明确的 NXDOMAIN 即可采用，取消其余在飞的查询
+            if (attempt.Response.HasAnswers || attempt.Response.ResponseCode == DnsResponseCode.NxDomain)
+            {
+                await raceCts.CancelAsync();
+                return new UpstreamBatchResult(attempt.Response, errors);
+            }
+
+            fallback ??= attempt.Response;
         }
 
-        return fallback;
+        return new UpstreamBatchResult(fallback, errors);
     }
 
     /// <summary>顺序查询：逐个尝试直到成功</summary>
-    private async Task<UpstreamResponse?> SequentialAsync(
-        IPAddress[] servers, string domain, DnsRecordType type, ushort classValue,
+    private async Task<UpstreamBatchResult> SequentialAsync(
+        IPAddress[] servers,
+        string domain,
+        DnsRecordType type,
+        ushort classValue,
         CancellationToken cancellationToken)
     {
         UpstreamResponse? fallback = null;
+        List<string> errors = [];
 
         foreach (var server in servers)
         {
-            var result = await QueryServerAsync(server, domain, type, classValue, cancellationToken);
-            if (result is null)
+            var attempt = await QueryServerAsync(server, domain, type, classValue, cancellationToken);
+            if (attempt.Response is null)
+            {
+                if (attempt.Error is not null)
+                    errors.Add(attempt.Error);
                 continue;
+            }
 
-            if (result.HasAnswers || result.ResponseCode == DnsResponseCode.NxDomain)
-                return result;
+            if (attempt.Response.HasAnswers || attempt.Response.ResponseCode == DnsResponseCode.NxDomain)
+                return new UpstreamBatchResult(attempt.Response, errors);
 
-            fallback ??= result;
+            fallback ??= attempt.Response;
         }
 
-        return fallback;
+        return new UpstreamBatchResult(fallback, errors);
     }
 
     /// <summary>
     /// 查询单个上游服务器。使用独立且 Connect 过的 socket：
     /// 内核只投递来自该地址的包，源地址伪造在协议栈层就被挡掉。
     /// </summary>
-    private async Task<UpstreamResponse?> QueryServerAsync(
-        IPAddress server, string domain, DnsRecordType type, ushort classValue,
+    private async Task<UpstreamAttempt> QueryServerAsync(
+        IPAddress server,
+        string domain,
+        DnsRecordType type,
+        ushort classValue,
         CancellationToken cancellationToken)
     {
         // 每次查询使用新的随机 TXID，绝不复用客户端的 TXID
@@ -240,12 +270,12 @@ public sealed class UpstreamDnsResolver(
         catch (OperationCanceledException)
         {
             logger.LogDebug("Upstream DNS query timed out: {Server} {Domain} {Type}", server, domain, type);
-            return null;
+            return new UpstreamAttempt(null, $"{server}: socket rent timeout");
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to rent upstream socket: {Server}", server);
-            return null;
+            return new UpstreamAttempt(null, $"{server}: socket rent failed ({ex.Message})");
         }
 
         var returnToPool = false;
@@ -287,7 +317,7 @@ public sealed class UpstreamDnsResolver(
                     if (response is not null)
                     {
                         returnToPool = true;
-                        return response;
+                        return new UpstreamAttempt(response, null);
                     }
 
                     if (truncated)
@@ -306,7 +336,7 @@ public sealed class UpstreamDnsResolver(
                     logger.LogDebug("Discarded upstream response that did not match the query: {Server} {Domain} {Type}", server, domain, type);
                 }
 
-                return null;
+                return new UpstreamAttempt(null, $"{server}: UDP query timed out");
             }
             finally
             {
@@ -319,19 +349,19 @@ public sealed class UpstreamDnsResolver(
         catch (OperationCanceledException)
         {
             logger.LogDebug("Upstream DNS query timed out: {Server} {Domain} {Type}", server, domain, type);
-            return null;
+            return new UpstreamAttempt(null, $"{server}: UDP query timeout");
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to query upstream DNS server: {Server}", server);
-            return null;
+            return new UpstreamAttempt(null, $"{server}: UDP query failed ({ex.Message})");
         }
     }
 
     /// <summary>
     /// UDP 应答设置了 TC 位时，按 RFC 1035 回退到 TCP 重新查询。
     /// </summary>
-    private async Task<UpstreamResponse?> QueryServerOverTcpAsync(
+    private async Task<UpstreamAttempt> QueryServerOverTcpAsync(
         IPAddress server,
         ushort transactionId,
         string domain,
@@ -364,13 +394,13 @@ public sealed class UpstreamDnsResolver(
             if (responseLength < DnsHeader.Size || responseLength > DnsLimits.MaxMessageSize)
             {
                 logger.LogDebug("Invalid TCP DNS response length from upstream {Server}: {Length}", server, responseLength);
-                return null;
+                return new UpstreamAttempt(null, $"{server}: invalid TCP response length ({responseLength})");
             }
 
             var responseData = new byte[responseLength];
             await ReadExactlyAsync(stream, responseData, cancellationToken);
 
-            return ValidateAndParse(
+            var response = ValidateAndParse(
                 responseData,
                 transactionId,
                 domain,
@@ -378,16 +408,20 @@ public sealed class UpstreamDnsResolver(
                 classValue,
                 server,
                 out _);
+
+            return response is null
+                ? new UpstreamAttempt(null, $"{server}: invalid TCP DNS response")
+                : new UpstreamAttempt(response, null);
         }
         catch (OperationCanceledException)
         {
             logger.LogDebug("Upstream DNS over TCP timed out: {Server} {Domain} {Type}", server, domain, type);
-            return null;
+            return new UpstreamAttempt(null, $"{server}: TCP fallback timeout");
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Upstream DNS over TCP query failed: {Server}", server);
-            return null;
+            return new UpstreamAttempt(null, $"{server}: TCP fallback failed ({ex.Message})");
         }
     }
 
@@ -687,7 +721,7 @@ public sealed class UpstreamDnsResolver(
         _concurrencyLimit.Dispose();
     }
 
-    private sealed class UpstreamSocketLease(UpstreamSocketPool pool, UdpClient client)
+    internal sealed class UpstreamSocketLease(UpstreamSocketPool pool, UdpClient client)
     {
         private readonly UdpClient _client = client;
         private int _returned;
@@ -707,7 +741,7 @@ public sealed class UpstreamDnsResolver(
         }
     }
 
-    private sealed class UpstreamSocketPool(IPAddress server, int capacity)
+    internal sealed class UpstreamSocketPool(IPAddress server, int capacity)
     {
         private readonly ConcurrentQueue<UdpClient> _idle = new();
         private readonly SemaphoreSlim _slots = new(Math.Max(1, capacity), Math.Max(1, capacity));
@@ -769,6 +803,7 @@ public sealed class UpstreamDnsResolver(
             if (Volatile.Read(ref _closed) == 0)
             {
                 _idle.Enqueue(client);
+                _slots.Release();
             }
             else
             {
@@ -793,8 +828,8 @@ public sealed class UpstreamDnsResolver(
 
             while (_idle.TryDequeue(out var client))
             {
+                // 每个 idle socket 在 Return 时已经释放过对应的 _slots 许可。
                 client.Dispose();
-                _slots.Release();
             }
 
             TryDisposeGate();

@@ -58,6 +58,18 @@
     --shadow-lg: 0 8px 24px rgba(19, 32, 54, .12), 0 2px 6px rgba(19, 32, 54, .06);
     --ring: 0 0 0 3px rgba(59, 111, 232, .32);
 
+    /* DNS 记录类型标签 */
+    --tag-A-bg: #e7f0fe; --tag-A-fg: #1c4fd0; --tag-A-line: #c3d8fb;
+    --tag-AAAA-bg: #f1e9fe; --tag-AAAA-fg: #6b34c4; --tag-AAAA-line: #ddcbf9;
+    --tag-CNAME-bg: #e5f7ee; --tag-CNAME-fg: #10794f; --tag-CNAME-line: #bfe8d3;
+    --tag-TXT-bg: #fef3e0; --tag-TXT-fg: #96610a; --tag-TXT-line: #f6dcae;
+    --tag-NS-bg: #e3f6f5; --tag-NS-fg: #0f7570; --tag-NS-line: #b9e5e3;
+    --tag-MX-bg: #fdeceb; --tag-MX-fg: #b3261e; --tag-MX-line: #f7cac7;
+    --tag-SRV-bg: #eaeef4; --tag-SRV-fg: #3f5170; --tag-SRV-line: #ccd5e3;
+    --tag-PTR-bg: #eceef1; --tag-PTR-fg: #37475e; --tag-PTR-line: #d3d9e2;
+    --tag-CAA-bg: #fdeaf3; --tag-CAA-fg: #a3216b; --tag-CAA-line: #f6c6dd;
+    --tag-SOA-bg: #f0eee8; --tag-SOA-fg: #6b5b34; --tag-SOA-line: #ded8c8;
+
     /* 尺度 */
     --r-sm: 6px;
     --r-md: 10px;
@@ -123,6 +135,17 @@
     --shadow-md: 0 2px 6px rgba(0, 0, 0, .45), 0 8px 20px rgba(0, 0, 0, .3);
     --shadow-lg: 0 12px 32px rgba(0, 0, 0, .55);
     --ring: 0 0 0 3px rgba(111, 155, 255, .4);
+
+    --tag-A-bg: #16264a; --tag-A-fg: #8db4ff; --tag-A-line: #24396b;
+    --tag-AAAA-bg: #251a40; --tag-AAAA-fg: #c0a2f5; --tag-AAAA-line: #3a2a5e;
+    --tag-CNAME-bg: #10291f; --tag-CNAME-fg: #5fd39b; --tag-CNAME-line: #1f5540;
+    --tag-TXT-bg: #2b2114; --tag-TXT-fg: #e8b45f; --tag-TXT-line: #5a441f;
+    --tag-NS-bg: #11292a; --tag-NS-fg: #66cfc9; --tag-NS-line: #1e4a4a;
+    --tag-MX-bg: #2c1719; --tag-MX-fg: #f28b84; --tag-MX-line: #5e2a2a;
+    --tag-SRV-bg: #1c2433; --tag-SRV-fg: #a6b6d1; --tag-SRV-line: #2f3c52;
+    --tag-PTR-bg: #1d232e; --tag-PTR-fg: #9aa8bd; --tag-PTR-line: #2e3846;
+    --tag-CAA-bg: #2c1524; --tag-CAA-fg: #ef92c0; --tag-CAA-line: #55274170;
+    --tag-SOA-bg: #26231a; --tag-SOA-fg: #cfc196; --tag-SOA-line: #443e2c;
 }
 
 /* 未显式选择主题时跟随系统 */
@@ -158,6 +181,17 @@
         --shadow-md: 0 2px 6px rgba(0, 0, 0, .45), 0 8px 20px rgba(0, 0, 0, .3);
         --shadow-lg: 0 12px 32px rgba(0, 0, 0, .55);
         --ring: 0 0 0 3px rgba(111, 155, 255, .4);
+
+        --tag-A-bg: #16264a; --tag-A-fg: #8db4ff; --tag-A-line: #24396b;
+        --tag-AAAA-bg: #251a40; --tag-AAAA-fg: #c0a2f5; --tag-AAAA-line: #3a2a5e;
+        --tag-CNAME-bg: #10291f; --tag-CNAME-fg: #5fd39b; --tag-CNAME-line: #1f5540;
+        --tag-TXT-bg: #2b2114; --tag-TXT-fg: #e8b45f; --tag-TXT-line: #5a441f;
+        --tag-NS-bg: #11292a; --tag-NS-fg: #66cfc9; --tag-NS-line: #1e4a4a;
+        --tag-MX-bg: #2c1719; --tag-MX-fg: #f28b84; --tag-MX-line: #5e2a2a;
+        --tag-SRV-bg: #1c2433; --tag-SRV-fg: #a6b6d1; --tag-SRV-line: #2f3c52;
+        --tag-PTR-bg: #1d232e; --tag-PTR-fg: #9aa8bd; --tag-PTR-line: #2e3846;
+        --tag-CAA-bg: #2c1524; --tag-CAA-fg: #ef92c0; --tag-CAA-line: #55274170;
+        --tag-SOA-bg: #26231a; --tag-SOA-fg: #cfc196; --tag-SOA-line: #443e2c;
     }
 }
 
@@ -1708,34 +1742,24 @@ td.col-actions { text-align: right; }
     border: 1px solid var(--border);
 }
 
-.tag--A     { background: #e7f0fe; color: #1c4fd0; border-color: #c3d8fb; }
-.tag--AAAA  { background: #f1e9fe; color: #6b34c4; border-color: #ddcbf9; }
-.tag--CNAME { background: #e5f7ee; color: #10794f; border-color: #bfe8d3; }
-.tag--TXT   { background: #fef3e0; color: #96610a; border-color: #f6dcae; }
-.tag--NS    { background: #e3f6f5; color: #0f7570; border-color: #b9e5e3; }
-.tag--MX    { background: #fdeceb; color: #b3261e; border-color: #f7cac7; }
-.tag--SRV   { background: #eaeef4; color: #3f5170; border-color: #ccd5e3; }
-.tag--PTR   { background: #eceef1; color: #37475e; border-color: #d3d9e2; }
-.tag--CAA   { background: #fdeaf3; color: #a3216b; border-color: #f6c6dd; }
-.tag--SOA   { background: #f0eee8; color: #6b5b34; border-color: #ded8c8; }
-
-:root[data-theme='dark'] .tag--A     { background: #16264a; color: #8db4ff; border-color: #24396b; }
-:root[data-theme='dark'] .tag--AAAA  { background: #251a40; color: #c0a2f5; border-color: #3a2a5e; }
-:root[data-theme='dark'] .tag--CNAME { background: #10291f; color: #5fd39b; border-color: #1f5540; }
-:root[data-theme='dark'] .tag--TXT   { background: #2b2114; color: #e8b45f; border-color: #5a441f; }
-:root[data-theme='dark'] .tag--NS    { background: #11292a; color: #66cfc9; border-color: #1e4a4a; }
-:root[data-theme='dark'] .tag--MX    { background: #2c1719; color: #f28b84; border-color: #5e2a2a; }
-:root[data-theme='dark'] .tag--SRV   { background: #1c2433; color: #a6b6d1; border-color: #2f3c52; }
-:root[data-theme='dark'] .tag--PTR   { background: #1d232e; color: #9aa8bd; border-color: #2e3846; }
-:root[data-theme='dark'] .tag--CAA   { background: #2c1524; color: #ef92c0; border-color: #55274170; }
-:root[data-theme='dark'] .tag--SOA   { background: #26231a; color: #cfc196; border-color: #443e2c; }
+.tag--A     { background: var(--tag-A-bg); color: var(--tag-A-fg); border-color: var(--tag-A-line); }
+.tag--AAAA  { background: var(--tag-AAAA-bg); color: var(--tag-AAAA-fg); border-color: var(--tag-AAAA-line); }
+.tag--CNAME { background: var(--tag-CNAME-bg); color: var(--tag-CNAME-fg); border-color: var(--tag-CNAME-line); }
+.tag--TXT   { background: var(--tag-TXT-bg); color: var(--tag-TXT-fg); border-color: var(--tag-TXT-line); }
+.tag--NS    { background: var(--tag-NS-bg); color: var(--tag-NS-fg); border-color: var(--tag-NS-line); }
+.tag--MX    { background: var(--tag-MX-bg); color: var(--tag-MX-fg); border-color: var(--tag-MX-line); }
+.tag--SRV   { background: var(--tag-SRV-bg); color: var(--tag-SRV-fg); border-color: var(--tag-SRV-line); }
+.tag--PTR   { background: var(--tag-PTR-bg); color: var(--tag-PTR-fg); border-color: var(--tag-PTR-line); }
+.tag--CAA   { background: var(--tag-CAA-bg); color: var(--tag-CAA-fg); border-color: var(--tag-CAA-line); }
+.tag--SOA   { background: var(--tag-SOA-bg); color: var(--tag-SOA-fg); border-color: var(--tag-SOA-line); }
 
 /* 行内编辑/删除按钮：默认低调，行 hover 时才提升可见度 */
-td.col-actions {
+.row-actions {
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 4px;
+    min-height: 30px;
 }
 
 .row-edit,

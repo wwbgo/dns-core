@@ -42,6 +42,28 @@ public class UpstreamSettingsTests
     };
 
     [Fact]
+    public async Task UpstreamSocketPool_ShouldAllowRentAfterReturn()
+    {
+        var pool = new UpstreamDnsResolver.UpstreamSocketPool(IPAddress.Loopback, capacity: 1);
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+            var first = await pool.RentAsync(timeout.Token);
+            first.Return();
+
+            // 修复前，Return 没有释放 _slots，第二次租用会一直等到超时。
+            var second = await pool.RentAsync(timeout.Token);
+            second.Return();
+        }
+        finally
+        {
+            pool.Close();
+        }
+    }
+
+    [Fact]
     public void BuildQuery_ShouldIncludeEdnsOptByDefault()
     {
         var query = UpstreamDnsResolver.BuildQuery(0x1234, "example.com", DnsRecordType.A, 1);

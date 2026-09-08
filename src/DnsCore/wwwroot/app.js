@@ -1404,14 +1404,16 @@ function renderRecords(records) {
                 <td data-label="权重" class="rec-weight num">${rec.type === 'A' || rec.type === 'AAAA' ? rec.weight ?? 1 : ''}</td>
                 <td data-label="TTL" class="rec-ttl num">${rec.ttl.toLocaleString()}s</td>
                 <td class="col-actions">
-                    <button type="button" class="row-edit" title="编辑记录"
-                            aria-label="编辑 ${escapeHtml(rec.domain)} ${escapeHtml(rec.type)} ${escapeHtml(rec.value)}">
-                        <svg aria-hidden="true"><use href="#i-edit"/></svg>
-                    </button>
-                    <button type="button" class="row-del" title="删除记录"
-                            aria-label="删除 ${escapeHtml(rec.domain)} ${escapeHtml(rec.type)} ${escapeHtml(rec.value)}">
-                        <svg aria-hidden="true"><use href="#i-trash"/></svg>
-                    </button>
+                    <div class="row-actions">
+                        <button type="button" class="row-edit" title="编辑记录"
+                                aria-label="编辑 ${escapeHtml(rec.domain)} ${escapeHtml(rec.type)} ${escapeHtml(rec.value)}">
+                            <svg aria-hidden="true"><use href="#i-edit"/></svg>
+                        </button>
+                        <button type="button" class="row-del" title="删除记录"
+                                aria-label="删除 ${escapeHtml(rec.domain)} ${escapeHtml(rec.type)} ${escapeHtml(rec.value)}">
+                            <svg aria-hidden="true"><use href="#i-trash"/></svg>
+                        </button>
+                    </div>
                 </td>
             </tr>`;
     }).join('');
